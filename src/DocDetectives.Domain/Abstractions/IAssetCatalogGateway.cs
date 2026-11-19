@@ -13,6 +13,14 @@ public interface IAssetCatalogGateway
         string assetId,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Creates the asset already linked to the given manual, or updates it if an asset with the same Id exists.
+    /// </summary>
+    Task<Asset> CreateAssetAsync(
+        Asset asset,
+        string manualId,
+        CancellationToken cancellationToken = default);
+
     Task LinkManualToAssetAsync(
         string assetId,
         string manualId,

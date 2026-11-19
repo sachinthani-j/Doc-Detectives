@@ -8,6 +8,7 @@ using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace DocDetectives.Infrastructure.Foundry;
 
@@ -196,9 +197,12 @@ public sealed class AzureContentUnderstandingExtractor(
     {
         var hash = SHA256.HashData(content);
         var shortHash = Convert.ToHexString(hash)[..12].ToLowerInvariant();
-        var sanitizedName = Path.GetFileNameWithoutExtension(fileName)
-            .Replace(' ', '_')
-            .ToLowerInvariant();
+        // Azure AI Search keys may only contain letters, digits, '_', '-' or '='.
+        // Each other character (spaces, brackets, dots, accents) becomes '_', so IDs that were already valid stay the same.
+        var sanitizedName = Regex.Replace(
+            Path.GetFileNameWithoutExtension(fileName).ToLowerInvariant(),
+            "[^a-z0-9_-]",
+            "_");
         return $"{sanitizedName}_{shortHash}";
     }
 }

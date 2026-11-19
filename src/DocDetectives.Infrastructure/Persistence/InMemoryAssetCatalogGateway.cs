@@ -46,6 +46,18 @@ public sealed class InMemoryAssetCatalogGateway : IAssetCatalogGateway
         return Task.FromResult(asset);
     }
 
+    public Task<Asset> CreateAssetAsync(Asset asset, string manualId, CancellationToken cancellationToken = default)
+    {
+        lock (_assets)
+        {
+            _assets.RemoveAll(a => a.Id.Equals(asset.Id, StringComparison.OrdinalIgnoreCase));
+            _assets.Add(asset);
+        }
+
+        _links.GetOrAdd(asset.Id, _ => []).Add((manualId, 1.0, MappingStatus.Created));
+        return Task.FromResult(asset);
+    }
+
     public Task LinkManualToAssetAsync(
         string assetId,
         string manualId,

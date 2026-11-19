@@ -2,6 +2,7 @@
 
 public sealed record EquipmentAssetStructure(
     string? Manufacturer,
+    string? EquipmentName,
     List<string> ModelNumbers,
     string? EquipmentCategory,
     string? DocumentCode,

@@ -15,6 +15,7 @@ public sealed class ManualStructureExtractionSkill(IChatClient chatClient)
         var prompt = $$"""
             You are an industrial equipment documentation analyst. Extract the structured asset data from the technical manual below.
             Preserve exact OEM part/article numbers, model numbers, error codes, and numeric tolerances/limits.
+            EquipmentName is the product name as the manual titles it (e.g. "EFG 213-320 Electric Forklift Truck"), without the manufacturer name.
             If a field is not present in the manual, return null or an empty list—do not guess.
 
             MANUAL FILE: {{manual.FileName}}
@@ -29,6 +30,7 @@ public sealed class ManualStructureExtractionSkill(IChatClient chatClient)
 
         return response.Result ?? new EquipmentAssetStructure(
             Manufacturer: null,
+            EquipmentName: null,
             ModelNumbers: [],
             EquipmentCategory: null,
             DocumentCode: null,

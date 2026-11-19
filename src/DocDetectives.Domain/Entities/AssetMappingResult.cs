@@ -4,6 +4,7 @@ public enum MappingStatus
 {
     AutoLinked,
     NeedsReview,
+    Created,
     Unmatched
 }
 

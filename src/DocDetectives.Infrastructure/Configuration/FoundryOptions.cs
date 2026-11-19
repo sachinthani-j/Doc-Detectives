@@ -6,6 +6,7 @@ public sealed class DocDetectivesOptions
 
     public string ManualsFolder { get; set; } = "./manuals";
     public double AutoLinkConfidenceThreshold { get; set; } = 0.85;
+    public bool AutoCreateAssets { get; set; } = true;
     public ContentUnderstandingOptions FoundryContentUnderstanding { get; set; } = new();
     public FoundryOpenAIOptions FoundryOpenAI { get; set; } = new();
     public AzureSearchOptions AzureSearch { get; set; } = new();
@@ -34,6 +35,8 @@ public sealed class AzureSearchOptions
     public string ApiKey { get; set; } = string.Empty;
     public string IndexName { get; set; } = "docdetectives-manuals";
     public string AssetsIndexName { get; set; } = "assets";
-    public string AssetKeyField { get; set; } = "id";
+    public string AssetKeyField { get; set; } = "key";
+    public string AssetIdField { get; set; } = "assetId";
+    public string LinkedManualIdsField { get; set; } = "linkedManualIds";
     public int EmbeddingDimensions { get; set; } = 3072;
 }

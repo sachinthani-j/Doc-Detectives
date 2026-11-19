@@ -72,13 +72,6 @@ builder.Services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(sp 
         .AsIEmbeddingGenerator();
 });
 
-// 4. Register RAG Index, Skills, and Ingestion Orchestrator
-builder.Services.AddSingleton<IKnowledgeIndex, AzureAiSearchKnowledgeIndex>();
-builder.Services.AddSingleton<MarkdownManualChunker>();
-builder.Services.AddSingleton<AssetMatchingSkill>();
-builder.Services.AddSingleton<TechnicalManualQaSkill>();
-builder.Services.AddSingleton<ManualIngestionOrchestrator>();
-
 // Optional: Run as an MCP stdio server for external Foundry/IDE agents
 if (mode.Equals("mcp", StringComparison.OrdinalIgnoreCase))
 {
@@ -98,7 +91,11 @@ var manualsFolder = customFolder ?? options.ManualsFolder;
 switch (mode.ToLowerInvariant())
 {
     case "ingest":
-        await RunFullIngestionAsync(host.Services, manualsFolder, options.AutoLinkConfidenceThreshold);
+        await RunFullIngestionAsync(
+            host.Services,
+            manualsFolder,
+            options.AutoLinkConfidenceThreshold,
+            options.AutoCreateAssets);
         break;
 
     case "chat":
@@ -116,7 +113,8 @@ switch (mode.ToLowerInvariant())
 static async Task RunFullIngestionAsync(
     IServiceProvider services,
     string folderPath,
-    double threshold)
+    double threshold,
+    bool autoCreateAssets)
 {
     var orchestrator = services.GetRequiredService<ManualIngestionOrchestrator>();
     var files = orchestrator.GetManualFilesFromFolder(folderPath);
@@ -129,11 +127,12 @@ static async Task RunFullIngestionAsync(
         var file = files[i];
         Console.WriteLine($"[{i + 1}/{files.Count}] Processing '{Path.GetFileName(file)}'...");
 
-        var report = await orchestrator.ProcessManualAsync(file, threshold);
+        var report = await orchestrator.ProcessManualAsync(file, threshold, autoCreateAssets);
         var structure = report.ExtractedManual.AssetStructure;
 
         Console.WriteLine($"  Manual ID       : {report.ExtractedManual.ManualId}");
         Console.WriteLine($"  Manufacturer    : {report.ExtractedManual.Manufacturer ?? "Unknown"}");
+        Console.WriteLine($"  Equipment Name  : {structure?.EquipmentName ?? "Unknown"}");
         Console.WriteLine($"  Models          : {string.Join(", ", report.ExtractedManual.ModelNumbers)}");
         Console.WriteLine($"  Category        : {report.ExtractedManual.EquipmentCategory ?? "Unknown"}");
 
@@ -158,6 +157,7 @@ static async Task RunFullIngestionAsync(
             }
         }
 
+        Console.WriteLine($"  Asset Creation  : {report.AssetCreationNote}");
         Console.WriteLine();
     }
 
