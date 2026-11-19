@@ -13,11 +13,23 @@ public interface IAssetCatalogGateway
         string assetId,
         CancellationToken cancellationToken = default);
 
+    Task<Asset?> FindAssetBySerialNumberAsync(
+        string serialNumber,
+        CancellationToken cancellationToken = default);
+
     /// <summary>
-    /// Creates the asset already linked to the given manual, or updates it if an asset with the same Id exists.
+    /// Direct children of an asset in the hierarchy (assets whose parent is the given asset).
     /// </summary>
-    Task<Asset> CreateAssetAsync(
-        Asset asset,
+    Task<IReadOnlyList<Asset>> GetChildAssetsAsync(
+        string parentAssetId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Creates the assets (e.g. a root asset and its sub-assets) already linked to the given manual.
+    /// Assets whose Id already exists are updated instead.
+    /// </summary>
+    Task CreateAssetsAsync(
+        IReadOnlyList<Asset> assets,
         string manualId,
         CancellationToken cancellationToken = default);
 

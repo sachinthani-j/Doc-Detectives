@@ -11,6 +11,7 @@ public sealed class AssetMatchingSkill(
     public async Task<IReadOnlyList<AssetMappingResult>> MatchManualToAssetsAsync(
         ExtractedManual manual,
         double autoLinkThreshold = 0.85,
+        bool persistLinks = true,
         CancellationToken cancellationToken = default)
     {
         // 1. Build search terms from all extracted model numbers, falling back to category or file name
@@ -76,7 +77,7 @@ public sealed class AssetMatchingSkill(
                 ? MappingStatus.AutoLinked
                 : MappingStatus.NeedsReview;
 
-            if (status == MappingStatus.AutoLinked)
+            if (persistLinks && status == MappingStatus.AutoLinked)
             {
                 await assetCatalog.LinkManualToAssetAsync(
                     match.AssetId,

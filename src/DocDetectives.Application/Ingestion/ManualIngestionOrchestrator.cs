@@ -5,7 +5,6 @@ using DocDetectives.Domain.Entities;
 using Microsoft.Extensions.AI;
 using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 
 namespace DocDetectives.Application.Ingestion;
 
@@ -13,10 +12,21 @@ public sealed record ManualProcessingReport(
     ExtractedManual ExtractedManual,
     IReadOnlyList<AssetMappingResult> Mappings,
     int EmbeddedChunkCount,
-    string AssetCreationNote);
+    string AssetCreationNote,
+    IReadOnlyList<Asset> CreatedAssets);
+
+/// <summary>Result for one uploaded file: exactly one of Manual or Inspection is set, depending on the document type.</summary>
+public sealed record DocumentProcessingReport(
+    string DocumentId,
+    string FileName,
+    DocumentClassification Classification,
+    ManualProcessingReport? Manual,
+    InspectionProcessingReport? Inspection);
 
 public sealed class ManualIngestionOrchestrator(
     IManualExtractor manualExtractor,
+    DocumentClassificationSkill classificationSkill,
+    InspectionJobService inspectionJobService,
     ManualStructureExtractionSkill structureExtractionSkill,
     AssetMatchingSkill matchingSkill,
     IAssetCatalogGateway assetCatalog,
@@ -41,18 +51,44 @@ public sealed class ManualIngestionOrchestrator(
             .ToList();
     }
 
-    public async Task<ManualProcessingReport> ProcessManualAsync(
+    /// <summary>
+    /// Reads any uploaded document once, then routes it: manuals are matched to assets and embedded for chat,
+    /// inspection documents become a job on the inspected asset.
+    /// </summary>
+    public async Task<DocumentProcessingReport> ProcessDocumentAsync(
         string filePath,
         double autoLinkThreshold = 0.85,
         bool autoCreateAssets = true,
         CancellationToken cancellationToken = default)
     {
         // 1. Extract layout-aware Markdown via Azure AI Content Understanding
-        await using var stream = File.OpenRead(filePath);
-        var fileName = Path.GetFileName(filePath);
-        var rawManual = await manualExtractor.ExtractAsync(stream, fileName, cancellationToken);
+        ExtractedManual rawDocument;
+        await using (var stream = File.OpenRead(filePath))
+        {
+            rawDocument = await manualExtractor.ExtractAsync(stream, Path.GetFileName(filePath), cancellationToken);
+        }
 
-        // 2. Extract typed equipment asset structure via LLM Structured Outputs
+        // 2. Decide what kind of document this is
+        var classification = await classificationSkill.ClassifyAsync(rawDocument, cancellationToken);
+
+        if (classification.DocumentType == DocumentType.Inspection)
+        {
+            var inspection = await inspectionJobService.ProcessAsync(rawDocument, autoLinkThreshold, cancellationToken);
+            return new DocumentProcessingReport(rawDocument.ManualId, rawDocument.FileName, classification, null, inspection);
+        }
+
+        var manual = await ProcessManualAsync(rawDocument, autoLinkThreshold, autoCreateAssets, cancellationToken);
+        return new DocumentProcessingReport(rawDocument.ManualId, rawDocument.FileName, classification, manual, null);
+    }
+
+    private async Task<ManualProcessingReport> ProcessManualAsync(
+        ExtractedManual rawManual,
+        double autoLinkThreshold,
+        bool autoCreateAssets,
+        CancellationToken cancellationToken)
+    {
+
+        // 3. Extract typed equipment asset structure via LLM Structured Outputs
         var structure = await structureExtractionSkill.ExtractStructureAsync(rawManual, cancellationToken);
         var enrichedManual = rawManual with
         {
@@ -62,15 +98,17 @@ public sealed class ManualIngestionOrchestrator(
             AssetStructure = structure
         };
 
-        // 3. Match extracted asset metadata against existing system assets
+        // 4. Match extracted asset metadata against existing system assets
         IReadOnlyList<AssetMappingResult> mappings = await matchingSkill.MatchManualToAssetsAsync(
             enrichedManual,
             autoLinkThreshold,
-            cancellationToken);
+            cancellationToken: cancellationToken);
 
-        // 3b. No existing asset matched at all: create one if the manual has enough information.
+        // 4b. No existing asset matched at all: create one if the manual has enough information.
         //     Any NeedsReview candidate blocks creation to avoid near-duplicate assets.
-        var newAsset = TryBuildAssetFromManual(structure, enrichedManual.Manufacturer, out var missingInfo);
+        //     The new root asset comes with its sub-asset hierarchy and spare parts (bill of materials).
+        var newAssets = AssetTreeBuilder.Build(structure, enrichedManual.Manufacturer, out var missingInfo);
+        IReadOnlyList<Asset> createdAssets = [];
         string assetCreationNote;
 
         if (mappings.Any(m => m.Status == MappingStatus.AutoLinked))
@@ -87,40 +125,46 @@ public sealed class ManualIngestionOrchestrator(
         {
             assetCreationNote = "Skipped: AutoCreateAssets is turned off in configuration.";
         }
-        else if (newAsset is null)
+        else if (newAssets is null)
         {
             assetCreationNote = $"Skipped: the manual has no {missingInfo}.";
         }
         else
         {
-            await assetCatalog.CreateAssetAsync(newAsset, enrichedManual.ManualId, cancellationToken);
-            assetCreationNote = $"Created asset '{newAsset.Id}'.";
+            await assetCatalog.CreateAssetsAsync(newAssets, enrichedManual.ManualId, cancellationToken);
+            createdAssets = newAssets;
+            var root = newAssets[0];
+            assetCreationNote =
+                $"Created asset '{root.Id}' with {newAssets.Count - 1} sub-asset(s) and " +
+                $"{newAssets.Sum(a => a.SpareParts?.Count ?? 0)} spare part(s).";
 
             mappings =
             [
                 new AssetMappingResult(
-                    AssetId: newAsset.Id,
+                    AssetId: root.Id,
                     ManualId: enrichedManual.ManualId,
                     ConfidenceScore: 1.0,
-                    Reasoning: $"No existing asset matched; created '{newAsset.Name}' from the manual.",
+                    Reasoning: $"No existing asset matched; created '{root.Name}' from the manual.",
                     Status: MappingStatus.Created)
             ];
         }
 
+        // Sub-assets are linked too, so chat scoped to e.g. the pump still finds this manual.
         var linkedAssetIds = mappings
             .Where(m => m.Status is MappingStatus.AutoLinked or MappingStatus.Created)
             .Select(m => m.AssetId)
+            .Concat(createdAssets.Select(a => a.Id))
             .Distinct()
             .ToList();
 
-        // 4. Build chunks: prepend the extracted structured asset summary + section Markdown chunks
+        // 5. Build chunks: prepend the extracted structured asset summary + section Markdown chunks
         var allChunks = new List<ManualChunk>
         {
             BuildStructuredSummaryChunk(enrichedManual, structure, linkedAssetIds)
         };
         allChunks.AddRange(chunker.ChunkManual(enrichedManual, linkedAssetIds));
 
-        // 5. Generate vector embeddings for all extracted info & manual sections
+        // 6. Generate vector embeddings for all extracted info & manual sections
         //    Only the text sent for embedding is shortened; the full Content is still stored and returned to the LLM.
         var embeddingInputs = allChunks.Select(c => TruncateForEmbedding(
             $"Manual: {c.FileName} | Manufacturer: {enrichedManual.Manufacturer ?? "Unknown"} | " +
@@ -135,10 +179,10 @@ public sealed class ManualIngestionOrchestrator(
             .Select((chunk, idx) => chunk with { Embedding = embeddings[idx].Vector })
             .ToList();
 
-        // 6. Store embedded chunks & extracted structured data in Azure AI Search
+        // 7. Store embedded chunks & extracted structured data in Azure AI Search
         await knowledgeIndex.UpsertChunksAsync(vectorizedChunks, cancellationToken);
 
-        return new ManualProcessingReport(enrichedManual, mappings, vectorizedChunks.Count, assetCreationNote);
+        return new ManualProcessingReport(enrichedManual, mappings, vectorizedChunks.Count, assetCreationNote, createdAssets);
     }
 
     // The embedding model accepts at most 8192 tokens per input. Technical text (part numbers, tables)
@@ -154,55 +198,6 @@ public sealed class ManualIngestionOrchestrator(
     {
         var index = content.IndexOf(StructuredJsonMarker, StringComparison.Ordinal);
         return index >= 0 ? content[..index] : content;
-    }
-
-    /// <summary>
-    /// Returns an asset when the manual names the equipment and its manufacturer (both mandatory).
-    /// Model numbers and category are optional; several models are stored together as one comma-separated value.
-    /// </summary>
-    private static Asset? TryBuildAssetFromManual(
-        EquipmentAssetStructure structure,
-        string? fallbackManufacturer,
-        out string? missingInfo)
-    {
-        var manufacturer = (structure.Manufacturer ?? fallbackManufacturer)?.Trim();
-        var name = structure.EquipmentName?.Trim();
-
-        missingInfo = (string.IsNullOrEmpty(manufacturer), string.IsNullOrEmpty(name)) switch
-        {
-            (true, true) => "manufacturer and no equipment name",
-            (true, false) => "manufacturer",
-            (false, true) => "equipment name",
-            _ => null
-        };
-
-        if (missingInfo is not null)
-        {
-            return null;
-        }
-
-        var models = structure.ModelNumbers
-            .Where(m => !string.IsNullOrWhiteSpace(m))
-            .Select(m => m.Trim())
-            .Distinct(StringComparer.OrdinalIgnoreCase);
-
-        return new Asset(
-            Id: BuildAssetId(manufacturer, name),
-            Name: name,
-            Manufacturer: manufacturer,
-            ModelNumber: string.Join(", ", models),
-            SerialNumber: string.Empty, // manuals describe an equipment type, not a physical unit
-            Category: structure.EquipmentCategory?.Trim() ?? string.Empty);
-    }
-
-    // Deterministic, Azure Search key-safe ID (letters, digits, '-') so re-ingestion updates the same asset.
-    private static string BuildAssetId(string manufacturer, string name)
-    {
-        static string Clean(string value) =>
-            Regex.Replace(value.ToUpperInvariant(), "[^A-Z0-9]+", "-").Trim('-');
-
-        var id = $"AUTO-{Clean(manufacturer)}-{Clean(name)}";
-        return id.Length <= 128 ? id : id[..128].TrimEnd('-');
     }
 
     private static ManualChunk BuildStructuredSummaryChunk(
@@ -248,7 +243,17 @@ public sealed class ManualIngestionOrchestrator(
             sb.AppendLine("\nSpare Parts & Accessories:");
             foreach (var part in structure.SpareParts)
             {
-                sb.AppendLine($"- {part.PartName} (Article #: {part.ArticleNumber})");
+                var owner = string.IsNullOrWhiteSpace(part.BelongsTo) ? "" : $" [fitted to: {part.BelongsTo}]";
+                sb.AppendLine($"- {part.PartName} (Article #: {part.ArticleNumber}){owner}");
+            }
+        }
+
+        if (structure.SubAssets.Count > 0)
+        {
+            sb.AppendLine("\nAsset Hierarchy (sub-assets):");
+            foreach (var sub in structure.SubAssets)
+            {
+                sb.AppendLine($"- {sub.Name} (parent: {sub.ParentName ?? "whole equipment"}) - {sub.Reason}");
             }
         }
 

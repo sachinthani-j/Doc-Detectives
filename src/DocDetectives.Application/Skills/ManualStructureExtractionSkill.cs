@@ -18,6 +18,14 @@ public sealed class ManualStructureExtractionSkill(IChatClient chatClient)
             EquipmentName is the product name as the manual titles it (e.g. "EFG 213-320 Electric Forklift Truck"), without the manufacturer name.
             If a field is not present in the manual, return null or an empty list—do not guess.
 
+            SubAssets: propose the asset hierarchy below the whole equipment, following the rules below.
+            Do not include the whole equipment itself. Use short component names (e.g. "Hydraulic Pump"); ParentName is
+            the name of another sub-asset, or null when it sits directly under the whole equipment.
+            SpareParts.BelongsTo: the sub-asset name the part is fitted to, or null when it belongs to the whole equipment.
+
+            ASSET STRUCTURE RULES:
+            {{AssetStructureRules}}
+
             MANUAL FILE: {{manual.FileName}}
 
             MANUAL MARKDOWN CONTENT:
@@ -38,6 +46,18 @@ public sealed class ManualStructureExtractionSkill(IChatClient chatClient)
             SafetyWarnings: [],
             CalibrationAndMaintenance: null,
             SpareParts: [],
-            FaultCodes: []);
+            FaultCodes: [],
+            SubAssets: []);
+    }
+
+    private static readonly string AssetStructureRules = LoadPrompt("asset-structure.md");
+
+    private static string LoadPrompt(string fileName)
+    {
+        using var stream = typeof(ManualStructureExtractionSkill).Assembly
+            .GetManifestResourceStream($"DocDetectives.Prompts.{fileName}")
+            ?? throw new InvalidOperationException($"Embedded prompt '{fileName}' not found.");
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
     }
 }

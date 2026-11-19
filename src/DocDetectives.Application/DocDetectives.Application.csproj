@@ -11,6 +11,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Prompt rules live in Markdown so they can be tuned without touching code. -->
+    <EmbeddedResource Include="Prompts\*.md" LogicalName="DocDetectives.Prompts.%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\DocDetectives.Domain\DocDetectives.Domain.csproj" />
   </ItemGroup>
 </Project>

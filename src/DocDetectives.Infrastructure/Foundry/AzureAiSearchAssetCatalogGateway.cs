@@ -2,6 +2,8 @@
 using Azure.Core;
 using Azure.Identity;
 using Azure.Search.Documents;
+using Azure.Search.Documents.Indexes;
+using Azure.Search.Documents.Indexes.Models;
 using Azure.Search.Documents.Models;
 using DocDetectives.Domain.Abstractions;
 using DocDetectives.Domain.Entities;
@@ -14,6 +16,9 @@ namespace DocDetectives.Infrastructure.Foundry;
 public sealed class AzureAiSearchAssetCatalogGateway : IAssetCatalogGateway
 {
     private readonly SearchClient _assetSearchClient;
+    private readonly SearchIndexClient _indexClient;
+    private readonly SemaphoreSlim _schemaLock = new(1, 1);
+    private bool _sparePartsFieldReady;
     private readonly DocDetectives.Infrastructure.Configuration.AzureSearchOptions _cfg;
 
     public AzureAiSearchAssetCatalogGateway(IOptions<DocDetectivesOptions> options)
@@ -25,12 +30,15 @@ public sealed class AzureAiSearchAssetCatalogGateway : IAssetCatalogGateway
 
         if (hasApiKey)
         {
-            _assetSearchClient = new SearchClient(endpoint, _cfg.AssetsIndexName, new AzureKeyCredential(_cfg.ApiKey));
+            var keyCredential = new AzureKeyCredential(_cfg.ApiKey);
+            _assetSearchClient = new SearchClient(endpoint, _cfg.AssetsIndexName, keyCredential);
+            _indexClient = new SearchIndexClient(endpoint, keyCredential);
         }
         else
         {
             TokenCredential credential = new DefaultAzureCredential();
             _assetSearchClient = new SearchClient(endpoint, _cfg.AssetsIndexName, credential);
+            _indexClient = new SearchIndexClient(endpoint, credential);
         }
     }
 
@@ -78,11 +86,42 @@ public sealed class AzureAiSearchAssetCatalogGateway : IAssetCatalogGateway
         return doc is null ? null : MapDocumentToAsset(doc);
     }
 
-    public async Task<Asset> CreateAssetAsync(Asset asset, string manualId, CancellationToken cancellationToken = default)
+    public async Task<Asset?> FindAssetBySerialNumberAsync(string serialNumber, CancellationToken cancellationToken = default)
     {
-        // The manual link is written in the same upload: a lookup straight after an upload may not see the new document yet.
+        var doc = await FindDocumentAsync("serialNumber", serialNumber, cancellationToken);
+        return doc is null ? null : MapDocumentToAsset(doc);
+    }
+
+    public async Task<IReadOnlyList<Asset>> GetChildAssetsAsync(
+        string parentAssetId,
+        CancellationToken cancellationToken = default)
+    {
+        var options = new SearchOptions
+        {
+            Filter = $"{_cfg.ParentAssetIdField} eq {SearchFilter.Create($"{parentAssetId}")}",
+            Size = 200
+        };
+
+        var response = await _assetSearchClient.SearchAsync<SearchDocument>("*", options, cancellationToken);
+        var children = new List<Asset>();
+        await foreach (var result in response.Value.GetResultsAsync())
+        {
+            children.Add(MapDocumentToAsset(result.Document));
+        }
+
+        return children;
+    }
+
+    public async Task CreateAssetsAsync(
+        IReadOnlyList<Asset> assets,
+        string manualId,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureSparePartsFieldAsync(cancellationToken);
+
+        // The manual link is written in the same upload: a lookup straight after an upload may not see the new documents yet.
         // Every field written here must exist in the assets index schema, or the upload is rejected.
-        var doc = new SearchDocument
+        var docs = assets.Select(asset => new SearchDocument
         {
             [_cfg.AssetKeyField] = ToDocumentKey(asset.Id),
             [_cfg.AssetIdField] = asset.Id,
@@ -91,11 +130,45 @@ public sealed class AzureAiSearchAssetCatalogGateway : IAssetCatalogGateway
             ["modelNumber"] = asset.ModelNumber,
             ["serialNumber"] = asset.SerialNumber,
             ["category"] = asset.Category,
+            [_cfg.ParentAssetIdField] = asset.ParentAssetId,
+            [_cfg.SparePartsField] = (asset.SpareParts ?? []).ToArray(),
             [_cfg.LinkedManualIdsField] = new[] { manualId }
-        };
+        });
 
-        await _assetSearchClient.MergeOrUploadDocumentsAsync([doc], cancellationToken: cancellationToken);
-        return asset;
+        // One batch for the whole tree; MergeOrUpload keeps re-ingestion idempotent.
+        await _assetSearchClient.MergeOrUploadDocumentsAsync(docs, cancellationToken: cancellationToken);
+    }
+
+    // Adds the spare-parts (bill of materials) field to the assets index once, if it is not there yet.
+    // Adding a field is non-breaking in Azure AI Search: existing documents simply have no value for it.
+    private async Task EnsureSparePartsFieldAsync(CancellationToken cancellationToken)
+    {
+        if (_sparePartsFieldReady)
+        {
+            return;
+        }
+
+        await _schemaLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_sparePartsFieldReady)
+            {
+                return;
+            }
+
+            SearchIndex index = await _indexClient.GetIndexAsync(_cfg.AssetsIndexName, cancellationToken);
+            if (!index.Fields.Any(f => f.Name == _cfg.SparePartsField))
+            {
+                index.Fields.Add(new SearchableField(_cfg.SparePartsField, collection: true) { IsFilterable = true });
+                await _indexClient.CreateOrUpdateIndexAsync(index, cancellationToken: cancellationToken);
+            }
+
+            _sparePartsFieldReady = true;
+        }
+        finally
+        {
+            _schemaLock.Release();
+        }
     }
 
     public async Task LinkManualToAssetAsync(
@@ -138,12 +211,16 @@ public sealed class AzureAiSearchAssetCatalogGateway : IAssetCatalogGateway
     }
 
     // The index key is not the asset ID itself (it is an encoded form of it), so look documents up by the assetId field.
-    private async Task<SearchDocument?> FindDocumentByAssetIdAsync(string assetId, CancellationToken cancellationToken)
+    private Task<SearchDocument?> FindDocumentByAssetIdAsync(string assetId, CancellationToken cancellationToken) =>
+        FindDocumentAsync(_cfg.AssetIdField, assetId, cancellationToken);
+
+    // Exact match on a filterable field; returns the first document found.
+    private async Task<SearchDocument?> FindDocumentAsync(string field, string value, CancellationToken cancellationToken)
     {
         var options = new SearchOptions
         {
             // SearchFilter.Create quotes and escapes the value; the field name must stay unquoted.
-            Filter = $"{_cfg.AssetIdField} eq {SearchFilter.Create($"{assetId}")}",
+            Filter = $"{field} eq {SearchFilter.Create($"{value}")}",
             Size = 1
         };
 
@@ -187,6 +264,10 @@ public sealed class AzureAiSearchAssetCatalogGateway : IAssetCatalogGateway
             Manufacturer: ReadField("manufacturer", "brand", "oem"),
             ModelNumber: ReadField("modelNumber", "model", "partNumber"),
             SerialNumber: ReadField("serialNumber", "serial"),
-            Category: ReadField("category", "assetType", "equipmentCategory"));
+            Category: ReadField("category", "assetType", "equipmentCategory"),
+            ParentAssetId: ReadField(_cfg.ParentAssetIdField) is { Length: > 0 } parentId ? parentId : null,
+            SpareParts: doc.TryGetValue(_cfg.SparePartsField, out var rawParts) && rawParts is IEnumerable<object> parts
+                ? parts.Select(p => p?.ToString()).OfType<string>().ToList()
+                : []);
     }
 }

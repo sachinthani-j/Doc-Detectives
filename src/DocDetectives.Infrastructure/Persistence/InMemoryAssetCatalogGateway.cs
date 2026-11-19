@@ -46,16 +46,33 @@ public sealed class InMemoryAssetCatalogGateway : IAssetCatalogGateway
         return Task.FromResult(asset);
     }
 
-    public Task<Asset> CreateAssetAsync(Asset asset, string manualId, CancellationToken cancellationToken = default)
+    public Task<Asset?> FindAssetBySerialNumberAsync(string serialNumber, CancellationToken cancellationToken = default)
+    {
+        var asset = _assets.FirstOrDefault(a => a.SerialNumber.Equals(serialNumber, StringComparison.OrdinalIgnoreCase));
+        return Task.FromResult(asset);
+    }
+
+    public Task<IReadOnlyList<Asset>> GetChildAssetsAsync(string parentAssetId, CancellationToken cancellationToken = default)
+    {
+        IReadOnlyList<Asset> children = _assets
+            .Where(a => string.Equals(a.ParentAssetId, parentAssetId, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        return Task.FromResult(children);
+    }
+
+    public Task CreateAssetsAsync(IReadOnlyList<Asset> assets, string manualId, CancellationToken cancellationToken = default)
     {
         lock (_assets)
         {
-            _assets.RemoveAll(a => a.Id.Equals(asset.Id, StringComparison.OrdinalIgnoreCase));
-            _assets.Add(asset);
+            foreach (var asset in assets)
+            {
+                _assets.RemoveAll(a => a.Id.Equals(asset.Id, StringComparison.OrdinalIgnoreCase));
+                _assets.Add(asset);
+                _links.GetOrAdd(asset.Id, _ => []).Add((manualId, 1.0, MappingStatus.Created));
+            }
         }
 
-        _links.GetOrAdd(asset.Id, _ => []).Add((manualId, 1.0, MappingStatus.Created));
-        return Task.FromResult(asset);
+        return Task.CompletedTask;
     }
 
     public Task LinkManualToAssetAsync(

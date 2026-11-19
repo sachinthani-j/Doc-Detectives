@@ -13,6 +13,8 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
+using OpenAI;
+using System.ClientModel;
 
 var mode = GetArgValue(args, "--mode") ?? "ingest";
 var customFolder = GetArgValue(args, "--dir");
@@ -33,17 +35,34 @@ builder.Services.AddHttpClient<IManualExtractor, AzureContentUnderstandingExtrac
 
 // 2. Register Asset System Gateway & MCP Server Tools
 builder.Services.AddSingleton<IAssetCatalogGateway, AzureAiSearchAssetCatalogGateway>();
+builder.Services.AddSingleton<IJobGateway, AzureAiSearchJobGateway>();
 builder.Services.AddSingleton<AssetSystemMcpTools>();
 
-// 3. Register Microsoft.Extensions.AI Chat & Embedding Clients (Foundry OpenAI)
-builder.Services.AddSingleton<AzureOpenAIClient>(sp =>
+// 3. Register Microsoft.Extensions.AI Chat & Embedding Clients: OpenAI or Azure OpenAI (Foundry), set by "AiProvider".
+//    AzureOpenAIClient derives from OpenAIClient, so everything below works the same for both.
+builder.Services.AddSingleton<OpenAIClient>(sp =>
 {
-    var cfg = sp.GetRequiredService<IOptions<DocDetectivesOptions>>().Value.FoundryOpenAI;
-    var endpoint = new Uri(cfg.Endpoint);
-    var hasApiKey = !string.IsNullOrWhiteSpace(cfg.ApiKey)
-                    && !cfg.ApiKey.StartsWith("<YOUR_", StringComparison.OrdinalIgnoreCase);
+    var options = sp.GetRequiredService<IOptions<DocDetectivesOptions>>().Value;
 
-    return hasApiKey
+    if (IsOpenAI(options))
+    {
+        var apiKey = IsSet(options.OpenAI.ApiKey)
+            ? options.OpenAI.ApiKey
+            : Environment.GetEnvironmentVariable("OPENAI_API_KEY");
+
+        if (!IsSet(apiKey))
+        {
+            throw new InvalidOperationException(
+                "AiProvider is 'OpenAI' but no key is set: fill DocDetectives:OpenAI:ApiKey in appsettings.json " +
+                "or set the OPENAI_API_KEY environment variable.");
+        }
+
+        return new OpenAIClient(new ApiKeyCredential(apiKey!));
+    }
+
+    var cfg = options.FoundryOpenAI;
+    var endpoint = new Uri(cfg.Endpoint);
+    return IsSet(cfg.ApiKey)
         ? new AzureOpenAIClient(endpoint, new AzureKeyCredential(cfg.ApiKey))
         : new AzureOpenAIClient(endpoint, new DefaultAzureCredential());
 });
@@ -52,23 +71,28 @@ builder.Services.AddSingleton<AzureOpenAIClient>(sp =>
 builder.Services.AddSingleton<IKnowledgeIndex, AzureAiSearchKnowledgeIndex>();
 builder.Services.AddSingleton<MarkdownManualChunker>();
 builder.Services.AddSingleton<ManualStructureExtractionSkill>();
+builder.Services.AddSingleton<DocumentClassificationSkill>();
+builder.Services.AddSingleton<InspectionExtractionSkill>();
+builder.Services.AddSingleton<InspectionJobService>();
 builder.Services.AddSingleton<AssetMatchingSkill>();
 builder.Services.AddSingleton<TechnicalManualQaSkill>();
 builder.Services.AddSingleton<ManualIngestionOrchestrator>();
 
 builder.Services.AddSingleton<IChatClient>(sp =>
 {
-    var cfg = sp.GetRequiredService<IOptions<DocDetectivesOptions>>().Value.FoundryOpenAI;
-    return sp.GetRequiredService<AzureOpenAIClient>()
-        .GetChatClient(cfg.ChatDeployment)
+    var options = sp.GetRequiredService<IOptions<DocDetectivesOptions>>().Value;
+    var model = IsOpenAI(options) ? options.OpenAI.ChatModel : options.FoundryOpenAI.ChatDeployment;
+    return sp.GetRequiredService<OpenAIClient>()
+        .GetChatClient(model)
         .AsIChatClient();
 });
 
 builder.Services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(sp =>
 {
-    var cfg = sp.GetRequiredService<IOptions<DocDetectivesOptions>>().Value.FoundryOpenAI;
-    return sp.GetRequiredService<AzureOpenAIClient>()
-        .GetEmbeddingClient(cfg.EmbeddingDeployment)
+    var options = sp.GetRequiredService<IOptions<DocDetectivesOptions>>().Value;
+    var model = IsOpenAI(options) ? options.OpenAI.EmbeddingModel : options.FoundryOpenAI.EmbeddingDeployment;
+    return sp.GetRequiredService<OpenAIClient>()
+        .GetEmbeddingClient(model)
         .AsIEmbeddingGenerator();
 });
 
@@ -120,14 +144,24 @@ static async Task RunFullIngestionAsync(
     var files = orchestrator.GetManualFilesFromFolder(folderPath);
 
     Console.WriteLine($"Scanning folder: {Path.GetFullPath(folderPath)}");
-    Console.WriteLine($"Found {files.Count} manual file(s) to extract and embed.\n");
+    Console.WriteLine($"Found {files.Count} document(s) to process.\n");
 
     for (var i = 0; i < files.Count; i++)
     {
         var file = files[i];
         Console.WriteLine($"[{i + 1}/{files.Count}] Processing '{Path.GetFileName(file)}'...");
 
-        var report = await orchestrator.ProcessManualAsync(file, threshold, autoCreateAssets);
+        var document = await orchestrator.ProcessDocumentAsync(file, threshold, autoCreateAssets);
+        Console.WriteLine($"  Document Type   : {document.Classification.DocumentType} ({document.Classification.Reason})");
+
+        if (document.Inspection is { } inspection)
+        {
+            PrintInspection(document.DocumentId, inspection);
+            Console.WriteLine();
+            continue;
+        }
+
+        var report = document.Manual!;
         var structure = report.ExtractedManual.AssetStructure;
 
         Console.WriteLine($"  Manual ID       : {report.ExtractedManual.ManualId}");
@@ -158,6 +192,7 @@ static async Task RunFullIngestionAsync(
         }
 
         Console.WriteLine($"  Asset Creation  : {report.AssetCreationNote}");
+        PrintAssetTree(report.CreatedAssets);
         Console.WriteLine();
     }
 
@@ -189,6 +224,80 @@ static async Task RunAssetChatAsync(IServiceProvider services, string? assetId)
         Console.WriteLine($"\nDocDetectives > {answer}\n");
     }
 }
+
+static void PrintInspection(string documentId, InspectionProcessingReport report)
+{
+    var doc = report.Inspection;
+    Console.WriteLine($"  Document ID     : {documentId}");
+    Console.WriteLine($"  Inspection      : {doc.Title ?? "Untitled"}" +
+                      (doc.InspectionDate is null ? "" : $" | Date: {doc.InspectionDate}") +
+                      (doc.Inspector is null ? "" : $" | Inspector: {doc.Inspector}"));
+    Console.WriteLine($"  Asset Stated    : ID: {doc.AssetId ?? "-"} | Serial: {doc.SerialNumber ?? "-"} | " +
+                      $"Name: {doc.AssetName ?? "-"} | Make/Model: {doc.Manufacturer ?? "-"} {doc.ModelNumber ?? ""}");
+    Console.WriteLine($"  Asset           : {(report.Asset is null ? "None" : $"[{report.Asset.Id}] {report.Asset.Name}")}");
+    Console.WriteLine($"  Asset Match     : {report.AssetResolution}");
+    Console.WriteLine($"  Job             : {report.JobNote}");
+
+    if (report.Job is not { } job)
+    {
+        return;
+    }
+
+    // Plain ASCII only: the default Windows console code page cannot display characters such as '•'.
+    foreach (var line in job.Lines)
+    {
+        var target = line.AssetId == job.AssetId ? $"{line.AssetId} (job asset)" : line.AssetId;
+        Console.WriteLine($"                    {line.LineNumber,3}. {line.Description}");
+        Console.WriteLine($"                         Equipment: [{target}]");
+
+        string?[] details =
+        [
+            line.Criteria is null ? null : $"Criteria: {line.Criteria}",
+            line.Result is null ? null : $"Result: {line.Result}",
+            line.Measurement is null ? null : $"Measurement: {line.Measurement}",
+            line.Remarks is null ? null : $"Remarks: {line.Remarks}"
+        ];
+
+        foreach (var detail in details.OfType<string>())
+        {
+            Console.WriteLine($"                         {detail}");
+        }
+    }
+}
+
+static void PrintAssetTree(IReadOnlyList<DocDetectives.Domain.Entities.Asset> assets)
+{
+    if (assets.Count == 0)
+    {
+        return;
+    }
+
+    void Print(DocDetectives.Domain.Entities.Asset asset, int depth)
+    {
+        var indent = new string(' ', 20 + depth * 4);
+        Console.WriteLine($"{indent}{asset.Name}  [{asset.Id}]");
+
+        foreach (var part in asset.SpareParts ?? [])
+        {
+            // Plain ASCII: the default Windows console code page cannot display characters such as '•'.
+            Console.WriteLine($"{indent}    - Spare part: {part}");
+        }
+
+        foreach (var child in assets.Where(a => a.ParentAssetId == asset.Id))
+        {
+            Print(child, depth + 1);
+        }
+    }
+
+    Print(assets[0], 0);
+}
+
+static bool IsOpenAI(DocDetectivesOptions options) =>
+    string.Equals(options.AiProvider, AiProviders.OpenAI, StringComparison.OrdinalIgnoreCase);
+
+// A key counts as set when it is not empty and not a "<YOUR_...>" placeholder.
+static bool IsSet(string? key) =>
+    !string.IsNullOrWhiteSpace(key) && !key.StartsWith("<YOUR_", StringComparison.OrdinalIgnoreCase);
 
 static string? GetArgValue(string[] args, string key)
 {

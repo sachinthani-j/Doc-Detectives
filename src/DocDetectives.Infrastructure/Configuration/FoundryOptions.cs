@@ -8,8 +8,27 @@ public sealed class DocDetectivesOptions
     public double AutoLinkConfidenceThreshold { get; set; } = 0.85;
     public bool AutoCreateAssets { get; set; } = true;
     public ContentUnderstandingOptions FoundryContentUnderstanding { get; set; } = new();
+    /// <summary>Which service runs chat and embeddings: "OpenAI" (api.openai.com) or "AzureOpenAI" (Foundry).</summary>
+    public string AiProvider { get; set; } = AiProviders.AzureOpenAI;
     public FoundryOpenAIOptions FoundryOpenAI { get; set; } = new();
+    public OpenAIOptions OpenAI { get; set; } = new();
     public AzureSearchOptions AzureSearch { get; set; } = new();
+}
+
+public static class AiProviders
+{
+    public const string OpenAI = "OpenAI";
+    public const string AzureOpenAI = "AzureOpenAI";
+}
+
+public sealed class OpenAIOptions
+{
+    /// <summary>OpenAI API key; when empty the OPENAI_API_KEY environment variable is used.</summary>
+    public string ApiKey { get; set; } = string.Empty;
+    public string ChatModel { get; set; } = "gpt-4.1";
+
+    /// <summary>Must stay the model the search index was built with, or stored vectors and query vectors won't match.</summary>
+    public string EmbeddingModel { get; set; } = "text-embedding-3-large";
 }
 
 public sealed class ContentUnderstandingOptions
@@ -35,8 +54,11 @@ public sealed class AzureSearchOptions
     public string ApiKey { get; set; } = string.Empty;
     public string IndexName { get; set; } = "docdetectives-manuals";
     public string AssetsIndexName { get; set; } = "assets";
+    public string JobsIndexName { get; set; } = "docdetectives-jobs";
     public string AssetKeyField { get; set; } = "key";
     public string AssetIdField { get; set; } = "assetId";
     public string LinkedManualIdsField { get; set; } = "linkedManualIds";
+    public string ParentAssetIdField { get; set; } = "parentAssetId";
+    public string SparePartsField { get; set; } = "spareParts";
     public int EmbeddingDimensions { get; set; } = 3072;
 }
