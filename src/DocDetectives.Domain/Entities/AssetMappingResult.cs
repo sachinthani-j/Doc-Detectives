@@ -3,7 +3,7 @@
 public enum MappingStatus
 {
     AutoLinked,
-    PendingReview,
+    NeedsReview,
     Unmatched
 }
 

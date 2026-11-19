@@ -44,6 +44,11 @@ public sealed class AzureAiSearchKnowledgeIndex : IKnowledgeIndex
         IReadOnlyList<ManualChunk> chunks,
         CancellationToken cancellationToken = default)
     {
+        if (chunks.Count == 0)
+        {
+            return;
+        }
+
         await EnsureIndexExistsAsync(cancellationToken);
 
         var documents = chunks.Select(c => new SearchDocument
@@ -116,6 +121,7 @@ public sealed class AzureAiSearchKnowledgeIndex : IKnowledgeIndex
 
         const string vectorProfileName = "manual-vector-profile";
         const string hnswConfigName = "manual-hnsw-config";
+        var dimensions = _cfg.EmbeddingDimensions > 0 ? _cfg.EmbeddingDimensions : 3072;
 
         var index = new SearchIndex(_cfg.IndexName)
         {
@@ -127,12 +133,7 @@ public sealed class AzureAiSearchKnowledgeIndex : IKnowledgeIndex
                 new SearchableField("sectionTitle"),
                 new SearchableField("content"),
                 new SimpleField("assetIds", SearchFieldDataType.Collection(SearchFieldDataType.String)) { IsFilterable = true },
-                new SearchField("contentVector", SearchFieldDataType.Collection(SearchFieldDataType.Single))
-                {
-                    IsSearchable = true,
-                    VectorSearchDimensions = _cfg.EmbeddingDimensions,
-                    VectorSearchProfileName = vectorProfileName
-                }
+                new VectorSearchField("contentVector", dimensions, vectorProfileName)
             ],
             VectorSearch = new VectorSearch
             {

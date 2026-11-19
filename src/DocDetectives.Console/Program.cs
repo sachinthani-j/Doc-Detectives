@@ -8,7 +8,6 @@ using DocDetectives.Domain.Abstractions;
 using DocDetectives.Infrastructure.Configuration;
 using DocDetectives.Infrastructure.Foundry;
 using DocDetectives.Infrastructure.Mcp;
-using DocDetectives.Infrastructure.Persistence;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -33,7 +32,7 @@ builder.Services.Configure<DocDetectivesOptions>(
 builder.Services.AddHttpClient<IManualExtractor, AzureContentUnderstandingExtractor>();
 
 // 2. Register Asset System Gateway & MCP Server Tools
-builder.Services.AddSingleton<IAssetCatalogGateway, InMemoryAssetCatalogGateway>();
+builder.Services.AddSingleton<IAssetCatalogGateway, AzureAiSearchAssetCatalogGateway>();
 builder.Services.AddSingleton<AssetSystemMcpTools>();
 
 // 3. Register Microsoft.Extensions.AI Chat & Embedding Clients (Foundry OpenAI)
@@ -48,6 +47,14 @@ builder.Services.AddSingleton<AzureOpenAIClient>(sp =>
         ? new AzureOpenAIClient(endpoint, new AzureKeyCredential(cfg.ApiKey))
         : new AzureOpenAIClient(endpoint, new DefaultAzureCredential());
 });
+
+// 4. Register RAG Index, Skills, and Ingestion Orchestrator
+builder.Services.AddSingleton<IKnowledgeIndex, AzureAiSearchKnowledgeIndex>();
+builder.Services.AddSingleton<MarkdownManualChunker>();
+builder.Services.AddSingleton<ManualStructureExtractionSkill>();
+builder.Services.AddSingleton<AssetMatchingSkill>();
+builder.Services.AddSingleton<TechnicalManualQaSkill>();
+builder.Services.AddSingleton<ManualIngestionOrchestrator>();
 
 builder.Services.AddSingleton<IChatClient>(sp =>
 {
@@ -123,9 +130,21 @@ static async Task RunFullIngestionAsync(
         Console.WriteLine($"[{i + 1}/{files.Count}] Processing '{Path.GetFileName(file)}'...");
 
         var report = await orchestrator.ProcessManualAsync(file, threshold);
+        var structure = report.ExtractedManual.AssetStructure;
 
         Console.WriteLine($"  Manual ID       : {report.ExtractedManual.ManualId}");
-        Console.WriteLine($"  Embedded Chunks : {report.EmbeddedChunkCount} vector(s) indexed in Azure AI Search");
+        Console.WriteLine($"  Manufacturer    : {report.ExtractedManual.Manufacturer ?? "Unknown"}");
+        Console.WriteLine($"  Models          : {string.Join(", ", report.ExtractedManual.ModelNumbers)}");
+        Console.WriteLine($"  Category        : {report.ExtractedManual.EquipmentCategory ?? "Unknown"}");
+
+        if (structure is not null)
+        {
+            Console.WriteLine($"  Extracted Data  : {structure.TechnicalSpecifications.Count} specs, " +
+                              $"{structure.SpareParts.Count} spare parts, {structure.FaultCodes.Count} fault codes, " +
+                              $"{structure.SafetyWarnings.Count} safety warnings");
+        }
+
+        Console.WriteLine($"  Embedded Chunks : {report.EmbeddedChunkCount} vector(s) stored in Azure AI Search");
 
         if (report.Mappings.Count == 0)
         {
@@ -149,17 +168,13 @@ static async Task RunAssetChatAsync(IServiceProvider services, string? assetId)
 {
     if (string.IsNullOrWhiteSpace(assetId))
     {
-        Console.Write("Enter Asset ID (e.g., PUMP-102): ");
-        assetId = Console.ReadLine()?.Trim();
-    }
-
-    if (string.IsNullOrWhiteSpace(assetId))
-    {
-        return;
+        Console.Write("Enter Asset ID (or press Enter to search all manuals): ");
+        assetId = Console.ReadLine()?.Trim() ?? string.Empty;
     }
 
     var qaSkill = services.GetRequiredService<TechnicalManualQaSkill>();
-    Console.WriteLine($"\nConnected to Asset [{assetId}]. Type 'exit' to quit.\n");
+    var scopeLabel = string.IsNullOrWhiteSpace(assetId) ? "ALL MANUALS" : $"Asset [{assetId}]";
+    Console.WriteLine($"\nConnected to {scopeLabel}. Type 'exit' to quit.\n");
 
     while (true)
     {

@@ -3,6 +3,8 @@ using DocDetectives.Application.Skills;
 using DocDetectives.Domain.Abstractions;
 using DocDetectives.Domain.Entities;
 using Microsoft.Extensions.AI;
+using System.Text;
+using System.Text.Json;
 
 namespace DocDetectives.Application.Ingestion;
 
@@ -13,6 +15,7 @@ public sealed record ManualProcessingReport(
 
 public sealed class ManualIngestionOrchestrator(
     IManualExtractor manualExtractor,
+    ManualStructureExtractionSkill structureExtractionSkill,
     AssetMatchingSkill matchingSkill,
     MarkdownManualChunker chunker,
     IEmbeddingGenerator<string, Embedding<float>> embeddingGenerator,
@@ -40,14 +43,24 @@ public sealed class ManualIngestionOrchestrator(
         double autoLinkThreshold = 0.85,
         CancellationToken cancellationToken = default)
     {
-        // 1. Extract multimodal content via Azure AI Content Understanding
+        // 1. Extract layout-aware Markdown via Azure AI Content Understanding
         await using var stream = File.OpenRead(filePath);
         var fileName = Path.GetFileName(filePath);
-        var extracted = await manualExtractor.ExtractAsync(stream, fileName, cancellationToken);
+        var rawManual = await manualExtractor.ExtractAsync(stream, fileName, cancellationToken);
 
-        // 2. Match manual metadata against existing system assets
+        // 2. Extract typed equipment asset structure via LLM Structured Outputs
+        var structure = await structureExtractionSkill.ExtractStructureAsync(rawManual, cancellationToken);
+        var enrichedManual = rawManual with
+        {
+            Manufacturer = structure.Manufacturer ?? rawManual.Manufacturer,
+            ModelNumbers = structure.ModelNumbers.Count > 0 ? structure.ModelNumbers : rawManual.ModelNumbers,
+            EquipmentCategory = structure.EquipmentCategory ?? rawManual.EquipmentCategory,
+            AssetStructure = structure
+        };
+
+        // 3. Match extracted asset metadata against existing system assets
         var mappings = await matchingSkill.MatchManualToAssetsAsync(
-            extracted,
+            enrichedManual,
             autoLinkThreshold,
             cancellationToken);
 
@@ -57,28 +70,97 @@ public sealed class ManualIngestionOrchestrator(
             .Distinct()
             .ToList();
 
-        // 3. Chunk Markdown along section headings
-        var rawChunks = chunker.ChunkManual(extracted, linkedAssetIds);
-        if (rawChunks.Count == 0)
+        // 4. Build chunks: prepend the extracted structured asset summary + section Markdown chunks
+        var allChunks = new List<ManualChunk>
         {
-            return new ManualProcessingReport(extracted, mappings, 0);
-        }
+            BuildStructuredSummaryChunk(enrichedManual, structure, linkedAssetIds)
+        };
+        allChunks.AddRange(chunker.ChunkManual(enrichedManual, linkedAssetIds));
 
-        // 4. Generate vector embeddings for all extracted chunks
-        var embeddingInputs = rawChunks.Select(c =>
-            $"Manual: {c.FileName} | Section: {c.SectionTitle}\n{c.Content}");
+        // 5. Generate vector embeddings for all extracted info & manual sections
+        var embeddingInputs = allChunks.Select(c =>
+            $"Manual: {c.FileName} | Manufacturer: {enrichedManual.Manufacturer ?? "Unknown"} | " +
+            $"Models: {string.Join(", ", enrichedManual.ModelNumbers)} | Section: {c.SectionTitle}\n{c.Content}");
 
         var embeddings = await embeddingGenerator.GenerateAsync(
             embeddingInputs,
             cancellationToken: cancellationToken);
 
-        var vectorizedChunks = rawChunks
+        var vectorizedChunks = allChunks
             .Select((chunk, idx) => chunk with { Embedding = embeddings[idx].Vector })
             .ToList();
 
-        // 5. Store embedded chunks in Azure AI Search
+        // 6. Store embedded chunks & extracted structured data in Azure AI Search
         await knowledgeIndex.UpsertChunksAsync(vectorizedChunks, cancellationToken);
 
-        return new ManualProcessingReport(extracted, mappings, vectorizedChunks.Count);
+        return new ManualProcessingReport(enrichedManual, mappings, vectorizedChunks.Count);
+    }
+
+    private static ManualChunk BuildStructuredSummaryChunk(
+        ExtractedManual manual,
+        EquipmentAssetStructure structure,
+        IReadOnlyList<string> assetIds)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"Manufacturer: {structure.Manufacturer ?? "Unknown"}");
+        sb.AppendLine($"Model Numbers: {string.Join(", ", structure.ModelNumbers)}");
+        sb.AppendLine($"Equipment Category: {structure.EquipmentCategory ?? "Unknown"}");
+        if (!string.IsNullOrWhiteSpace(structure.DocumentCode))
+        {
+            sb.AppendLine($"Document Code: {structure.DocumentCode}");
+        }
+
+        if (structure.TechnicalSpecifications.Count > 0)
+        {
+            sb.AppendLine("\nTechnical Specifications:");
+            foreach (var spec in structure.TechnicalSpecifications)
+            {
+                sb.AppendLine($"- {spec.Parameter}: {spec.Value}");
+            }
+        }
+
+        if (structure.SafetyWarnings.Count > 0)
+        {
+            sb.AppendLine("\nSafety Warnings:");
+            foreach (var warning in structure.SafetyWarnings)
+            {
+                sb.AppendLine($"- {warning}");
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(structure.CalibrationAndMaintenance))
+        {
+            sb.AppendLine($"\nCalibration & Maintenance:\n{structure.CalibrationAndMaintenance}");
+        }
+
+        if (structure.SpareParts.Count > 0)
+        {
+            sb.AppendLine("\nSpare Parts & Accessories:");
+            foreach (var part in structure.SpareParts)
+            {
+                sb.AppendLine($"- {part.PartName} (Article #: {part.ArticleNumber})");
+            }
+        }
+
+        if (structure.FaultCodes.Count > 0)
+        {
+            sb.AppendLine("\nFault Codes & Troubleshooting:");
+            foreach (var fault in structure.FaultCodes)
+            {
+                sb.AppendLine($"- {fault.CodeOrSymptom}: Cause = {fault.Cause} | Resolution = {fault.Resolution}");
+            }
+        }
+
+        sb.AppendLine("\nStructured JSON:");
+        sb.AppendLine(JsonSerializer.Serialize(structure));
+
+        return new ManualChunk(
+            ChunkId: $"{manual.ManualId}_structured_summary",
+            ManualId: manual.ManualId,
+            FileName: manual.FileName,
+            SectionTitle: "Extracted Asset Summary & Specifications",
+            Content: sb.ToString().Trim(),
+            AssetIds: assetIds,
+            Embedding: ReadOnlyMemory<float>.Empty);
     }
 }

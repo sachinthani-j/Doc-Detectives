@@ -1,39 +1,35 @@
 ﻿using DocDetectives.Domain.Abstractions;
 using DocDetectives.Domain.Entities;
 using Microsoft.Extensions.AI;
-using System.Text.Json;
 
 namespace DocDetectives.Application.Skills;
 
-/// <summary>
-/// Single-purpose skill that evaluates extracted manual metadata against candidate system assets.
-/// </summary>
 public sealed class AssetMatchingSkill(
-    IChatClient chatClient,
-    IAssetCatalogGateway assetCatalog)
+    IAssetCatalogGateway assetCatalog,
+    IChatClient chatClient)
 {
-    public sealed record AssetMatchEvaluation(List<CandidateScore> Matches);
-
-    public sealed record CandidateScore(
-        string AssetId,
-        double ConfidenceScore,
-        string Reasoning);
-
     public async Task<IReadOnlyList<AssetMappingResult>> MatchManualToAssetsAsync(
         ExtractedManual manual,
         double autoLinkThreshold = 0.85,
         CancellationToken cancellationToken = default)
     {
-        var primaryModel = manual.ModelNumbers.FirstOrDefault();
+        // 1. Build search terms from all extracted model numbers, falling back to category or file name
+        var modelQuery = manual.ModelNumbers.Count > 0
+            ? string.Join(" ", manual.ModelNumbers)
+            : manual.EquipmentCategory ?? Path.GetFileNameWithoutExtension(manual.FileName);
+
         var candidates = await assetCatalog.SearchAssetsAsync(
             manual.Manufacturer,
-            primaryModel,
+            modelQuery,
             cancellationToken);
 
-        // Broaden search if strict manufacturer+model lookup returned nothing
-        if (candidates.Count == 0)
+        // 2. Fallback: if manufacturer + model returned no hits in the index, search by model/category alone
+        if (candidates.Count == 0 && !string.IsNullOrWhiteSpace(manual.Manufacturer))
         {
-            candidates = await assetCatalog.SearchAssetsAsync(null, null, cancellationToken);
+            candidates = await assetCatalog.SearchAssetsAsync(
+                manufacturer: null,
+                modelKeyword: modelQuery,
+                cancellationToken);
         }
 
         if (candidates.Count == 0)
@@ -41,43 +37,44 @@ public sealed class AssetMatchingSkill(
             return [];
         }
 
-        var manualSnippet = manual.MarkdownContent.Length > 2000
-            ? manual.MarkdownContent[..2000]
-            : manual.MarkdownContent;
+        var candidateLines = string.Join("\n", candidates.Select(a =>
+            $"- AssetId: {a.Id} | Name: {a.Name} | Manufacturer: {a.Manufacturer} | Model: {a.ModelNumber} | Category: {a.Category}"));
+
+        var previewLength = Math.Min(manual.MarkdownContent.Length, 1500);
+        var excerpt = manual.MarkdownContent[..previewLength];
 
         var prompt = $$"""
-            You are an industrial asset-matching specialist. Match the technical manual below to the candidate assets.
-            Account for model number variants (e.g., "Series 400X" vs "S400X-REV2").
-            Only return assets that genuinely correspond to this manual. Assign a confidence score between 0.0 and 1.0.
+            You are an industrial asset-mapping specialist. Compare the extracted equipment manual metadata against the candidate assets from the asset index and score each relevant match from 0.0 to 1.0.
+            Only include assets that genuinely match the equipment described in the manual (score >= 0.50).
 
-            MANUAL METADATA:
-            - FileName: {{manual.FileName}}
-            - Extracted Manufacturer: {{manual.Manufacturer ?? "Unknown"}}
-            - Extracted Model Numbers: {{string.Join(", ", manual.ModelNumbers)}}
+            EXTRACTED MANUAL METADATA:
+            - Manual ID: {{manual.ManualId}}
+            - File Name: {{manual.FileName}}
+            - Manufacturer: {{manual.Manufacturer ?? "Unknown"}}
+            - Model Numbers: {{(manual.ModelNumbers.Count > 0 ? string.Join(", ", manual.ModelNumbers) : "Unknown")}}
             - Equipment Category: {{manual.EquipmentCategory ?? "Unknown"}}
-            - Opening Content Excerpt:
-            {{manualSnippet}}
+            - Document Code: {{manual.AssetStructure?.DocumentCode ?? "Unknown"}}
 
-            CANDIDATE ASSETS IN SYSTEM:
-            {{JsonSerializer.Serialize(candidates)}}
+            MANUAL OPENING EXCERPT:
+            {{excerpt}}
+
+            CANDIDATE ASSETS FROM INDEX:
+            {{candidateLines}}
             """;
 
-        var response = await chatClient.GetResponseAsync<AssetMatchEvaluation>(
+        // 3. Score candidate assets using structured output
+        var evaluation = await chatClient.GetResponseAsync<AssetMatchBatchResponse>(
             prompt,
             cancellationToken: cancellationToken);
 
+        var matches = evaluation.Result?.Matches ?? [];
         var results = new List<AssetMappingResult>();
 
-        if (response.Result?.Matches is null)
-        {
-            return results;
-        }
-
-        foreach (var match in response.Result.Matches.Where(m => m.ConfidenceScore >= 0.50))
+        foreach (var match in matches.Where(m => m.ConfidenceScore >= 0.50))
         {
             var status = match.ConfidenceScore >= autoLinkThreshold
                 ? MappingStatus.AutoLinked
-                : MappingStatus.PendingReview;
+                : MappingStatus.NeedsReview;
 
             if (status == MappingStatus.AutoLinked)
             {
@@ -90,13 +87,20 @@ public sealed class AssetMatchingSkill(
             }
 
             results.Add(new AssetMappingResult(
-                match.AssetId,
-                manual.ManualId,
-                match.ConfidenceScore,
-                match.Reasoning,
-                status));
+                AssetId: match.AssetId,
+                ManualId: manual.ManualId,
+                ConfidenceScore: match.ConfidenceScore,
+                Status: status,
+                Reasoning: match.Reasoning));
         }
 
         return results;
     }
+
+    private sealed record AssetMatchBatchResponse(List<AssetMatchCandidateScore> Matches);
+
+    private sealed record AssetMatchCandidateScore(
+        string AssetId,
+        double ConfidenceScore,
+        string Reasoning);
 }

@@ -7,4 +7,5 @@ public sealed record ExtractedManual(
     string? Manufacturer,
     IReadOnlyList<string> ModelNumbers,
     string? EquipmentCategory,
-    string RawJsonResponse);
+    string RawJsonResponse,
+    EquipmentAssetStructure? AssetStructure = null);
