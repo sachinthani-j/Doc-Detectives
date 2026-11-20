@@ -18,6 +18,7 @@ public sealed class AzureAiSearchAssetCatalogGateway : IAssetCatalogGateway
     private readonly SearchClient _assetSearchClient;
     private readonly SearchIndexClient _indexClient;
     private readonly SemaphoreSlim _schemaLock = new(1, 1);
+    private readonly SemaphoreSlim _writeLock = new(1, 1);
     private bool _sparePartsFieldReady;
     private readonly DocDetectives.Infrastructure.Configuration.AzureSearchOptions _cfg;
 
@@ -117,26 +118,35 @@ public sealed class AzureAiSearchAssetCatalogGateway : IAssetCatalogGateway
         string manualId,
         CancellationToken cancellationToken = default)
     {
-        await EnsureSparePartsFieldAsync(cancellationToken);
-
-        // The manual link is written in the same upload: a lookup straight after an upload may not see the new documents yet.
-        // Every field written here must exist in the assets index schema, or the upload is rejected.
-        var docs = assets.Select(asset => new SearchDocument
+        // Held for the whole write so a parallel ingest cannot interleave another asset update.
+        await _writeLock.WaitAsync(cancellationToken);
+        try
         {
-            [_cfg.AssetKeyField] = ToDocumentKey(asset.Id),
-            [_cfg.AssetIdField] = asset.Id,
-            ["name"] = asset.Name,
-            ["manufacturer"] = asset.Manufacturer,
-            ["modelNumber"] = asset.ModelNumber,
-            ["serialNumber"] = asset.SerialNumber,
-            ["category"] = asset.Category,
-            [_cfg.ParentAssetIdField] = asset.ParentAssetId,
-            [_cfg.SparePartsField] = (asset.SpareParts ?? []).ToArray(),
-            [_cfg.LinkedManualIdsField] = new[] { manualId }
-        });
+            await EnsureSparePartsFieldAsync(cancellationToken);
 
-        // One batch for the whole tree; MergeOrUpload keeps re-ingestion idempotent.
-        await _assetSearchClient.MergeOrUploadDocumentsAsync(docs, cancellationToken: cancellationToken);
+            // The manual link is written in the same upload: a lookup straight after an upload may not see the new documents yet.
+            // Every field written here must exist in the assets index schema, or the upload is rejected.
+            var docs = assets.Select(asset => new SearchDocument
+            {
+                [_cfg.AssetKeyField] = ToDocumentKey(asset.Id),
+                [_cfg.AssetIdField] = asset.Id,
+                ["name"] = asset.Name,
+                ["manufacturer"] = asset.Manufacturer,
+                ["modelNumber"] = asset.ModelNumber,
+                ["serialNumber"] = asset.SerialNumber,
+                ["category"] = asset.Category,
+                [_cfg.ParentAssetIdField] = asset.ParentAssetId,
+                [_cfg.SparePartsField] = (asset.SpareParts ?? []).ToArray(),
+                [_cfg.LinkedManualIdsField] = new[] { manualId }
+            });
+
+            // One batch for the whole tree; MergeOrUpload keeps re-ingestion idempotent.
+            await _assetSearchClient.MergeOrUploadDocumentsAsync(docs, cancellationToken: cancellationToken);
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
     }
 
     // Adds the spare-parts (bill of materials) field to the assets index once, if it is not there yet.
@@ -178,36 +188,45 @@ public sealed class AzureAiSearchAssetCatalogGateway : IAssetCatalogGateway
         MappingStatus status,
         CancellationToken cancellationToken = default)
     {
-        var existingDoc = await FindDocumentByAssetIdAsync(assetId, cancellationToken);
-        if (existingDoc is null)
+        // Read-modify-write of the linked-manual list. One writer at a time, or a parallel ingest can drop an id.
+        await _writeLock.WaitAsync(cancellationToken);
+        try
         {
-            return;
-        }
-
-        var manualIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (existingDoc.TryGetValue(_cfg.LinkedManualIdsField, out var rawIds) && rawIds is IEnumerable<object> items)
-        {
-            foreach (var item in items)
+            var existingDoc = await FindDocumentByAssetIdAsync(assetId, cancellationToken);
+            if (existingDoc is null)
             {
-                if (item?.ToString() is { Length: > 0 } id)
+                return;
+            }
+
+            var manualIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (existingDoc.TryGetValue(_cfg.LinkedManualIdsField, out var rawIds) && rawIds is IEnumerable<object> items)
+            {
+                foreach (var item in items)
                 {
-                    manualIds.Add(id);
+                    if (item?.ToString() is { Length: > 0 } id)
+                    {
+                        manualIds.Add(id);
+                    }
                 }
             }
+
+            if (!manualIds.Add(manualId))
+            {
+                return; // already linked
+            }
+
+            var patchDoc = new SearchDocument
+            {
+                [_cfg.AssetKeyField] = existingDoc[_cfg.AssetKeyField],
+                [_cfg.LinkedManualIdsField] = manualIds.ToArray()
+            };
+
+            await _assetSearchClient.MergeDocumentsAsync([patchDoc], cancellationToken: cancellationToken);
         }
-
-        if (!manualIds.Add(manualId))
+        finally
         {
-            return; // already linked
+            _writeLock.Release();
         }
-
-        var patchDoc = new SearchDocument
-        {
-            [_cfg.AssetKeyField] = existingDoc[_cfg.AssetKeyField],
-            [_cfg.LinkedManualIdsField] = manualIds.ToArray()
-        };
-
-        await _assetSearchClient.MergeDocumentsAsync([patchDoc], cancellationToken: cancellationToken);
     }
 
     // The index key is not the asset ID itself (it is an encoded form of it), so look documents up by the assetId field.

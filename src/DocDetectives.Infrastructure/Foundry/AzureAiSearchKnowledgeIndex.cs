@@ -49,6 +49,7 @@ public sealed class AzureAiSearchKnowledgeIndex : IKnowledgeIndex
             return;
         }
 
+        // Creates or updates the docdetectives-manuals index schema before any chunks are written.
         await EnsureIndexExistsAsync(cancellationToken);
 
         var documents = chunks.Select(c => new SearchDocument
@@ -62,6 +63,7 @@ public sealed class AzureAiSearchKnowledgeIndex : IKnowledgeIndex
             ["contentVector"] = c.Embedding.ToArray()
         });
 
+        // Writes chunk documents into docdetectives-manuals. chunkId is the key, so a later ingest replaces the same chunks.
         await _searchClient.MergeOrUploadDocumentsAsync(documents, cancellationToken: cancellationToken);
     }
 
@@ -142,6 +144,7 @@ public sealed class AzureAiSearchKnowledgeIndex : IKnowledgeIndex
             }
         };
 
+        // Creates the docdetectives-manuals index, or updates its schema when the field list above changes.
         await _indexClient.CreateOrUpdateIndexAsync(index, cancellationToken: cancellationToken);
         _indexVerified = true;
     }

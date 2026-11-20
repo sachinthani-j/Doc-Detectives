@@ -15,6 +15,7 @@ namespace DocDetectives.Infrastructure.Foundry;
 /// <summary>
 /// Sends PDF, DOCX, and Image manuals to Azure AI Content Understanding (Microsoft Foundry)
 /// using the :analyzeBinary endpoint and polls until Markdown and structured fields are ready.
+/// A file whose bytes were already analyzed is read back from the local cache instead of being uploaded again.
 /// </summary>
 public sealed class AzureContentUnderstandingExtractor(
     HttpClient httpClient,
@@ -32,7 +33,29 @@ public sealed class AzureContentUnderstandingExtractor(
         await fileStream.CopyToAsync(memoryStream, cancellationToken);
         var fileBytes = memoryStream.ToArray();
 
-        var manualId = ComputeManualId(fileName, fileBytes);
+        var (manualId, contentHash) = Identify(fileName, fileBytes);
+        var cachePath = CachePathFor(contentHash);
+
+        if (cachePath is not null && File.Exists(cachePath))
+        {
+            try
+            {
+                var cachedJson = await File.ReadAllTextAsync(cachePath, cancellationToken);
+                if (!string.IsNullOrWhiteSpace(cachedJson))
+                {
+                    return ParseExtractedManual(manualId, fileName, cachedJson);
+                }
+            }
+            catch (JsonException)
+            {
+                // A half-written cache file is ignored; the document is read from Content Understanding again.
+            }
+            catch (IOException)
+            {
+                // Cache is a shortcut. If it cannot be read, fall through to Content Understanding.
+            }
+        }
+
         var endpoint = _config.Endpoint.TrimEnd('/');
         var analyzeUrl =
             $"{endpoint}/contentunderstanding/analyzers/{_config.AnalyzerId}:analyzeBinary?api-version={_config.ApiVersion}";
@@ -59,8 +82,40 @@ public sealed class AzureContentUnderstandingExtractor(
 
         var operationUrl = locations.First();
         var rawJson = await PollForResultAsync(operationUrl, cancellationToken);
+        await TrySaveCacheAsync(cachePath, rawJson, cancellationToken);
 
         return ParseExtractedManual(manualId, fileName, rawJson);
+    }
+
+    private string? CachePathFor(string contentHash)
+    {
+        if (string.IsNullOrWhiteSpace(_config.CacheFolder))
+        {
+            return null;
+        }
+
+        return Path.Combine(_config.CacheFolder, contentHash + ".json");
+    }
+
+    private static async Task TrySaveCacheAsync(string? cachePath, string rawJson, CancellationToken cancellationToken)
+    {
+        if (cachePath is null)
+        {
+            return;
+        }
+
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
+            // Unique temporary name so two documents that share bytes can finish saving at the same time.
+            var temporaryPath = cachePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            await File.WriteAllTextAsync(temporaryPath, rawJson, cancellationToken);
+            File.Move(temporaryPath, cachePath, overwrite: true);
+        }
+        catch (IOException)
+        {
+            // The read already succeeded. A cache write failure must not fail the document.
+        }
     }
 
     private async Task<string> PollForResultAsync(string operationUrl, CancellationToken cancellationToken)
@@ -193,16 +248,15 @@ public sealed class AzureContentUnderstandingExtractor(
         return null;
     }
 
-    private static string ComputeManualId(string fileName, byte[] content)
+    // The manual id keeps its existing shape: sanitized file name plus the first 12 hex chars of the content hash.
+    // The cache file uses the full hash so two different files cannot share a saved response.
+    private static (string ManualId, string ContentHash) Identify(string fileName, byte[] content)
     {
-        var hash = SHA256.HashData(content);
-        var shortHash = Convert.ToHexString(hash)[..12].ToLowerInvariant();
-        // Azure AI Search keys may only contain letters, digits, '_', '-' or '='.
-        // Each other character (spaces, brackets, dots, accents) becomes '_', so IDs that were already valid stay the same.
+        var contentHash = Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();
         var sanitizedName = Regex.Replace(
             Path.GetFileNameWithoutExtension(fileName).ToLowerInvariant(),
             "[^a-z0-9_-]",
             "_");
-        return $"{sanitizedName}_{shortHash}";
+        return ($"{sanitizedName}_{contentHash[..12]}", contentHash);
     }
 }

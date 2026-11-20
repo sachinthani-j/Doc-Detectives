@@ -7,6 +7,12 @@ public sealed class DocDetectivesOptions
     public string ManualsFolder { get; set; } = "./manuals";
     public double AutoLinkConfidenceThreshold { get; set; } = 0.85;
     public bool AutoCreateAssets { get; set; } = true;
+
+    /// <summary>
+    /// How many documents to ingest at once. Each document still goes through Content Understanding,
+    /// classification, extraction, matching, and embedding in that order.
+    /// </summary>
+    public int IngestionParallelism { get; set; } = 3;
     public ContentUnderstandingOptions FoundryContentUnderstanding { get; set; } = new();
     /// <summary>Which service runs chat and embeddings: "OpenAI" (api.openai.com) or "AzureOpenAI" (Foundry).</summary>
     public string AiProvider { get; set; } = AiProviders.AzureOpenAI;
@@ -38,6 +44,12 @@ public sealed class ContentUnderstandingOptions
     public string AnalyzerId { get; set; } = "prebuilt-documentSearch";
     public string ApiVersion { get; set; } = "2025-11-01";
     public int PollIntervalSeconds { get; set; } = 2;
+
+    /// <summary>
+    /// Folder of saved Content Understanding responses, keyed by the SHA-256 of the file bytes
+    /// (the same hash the manual id is cut from). Empty disables the cache.
+    /// </summary>
+    public string CacheFolder { get; set; } = "./.cache/content-understanding";
 }
 
 public sealed class FoundryOpenAIOptions

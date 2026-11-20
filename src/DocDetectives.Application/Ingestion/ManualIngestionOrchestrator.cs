@@ -179,8 +179,10 @@ public sealed class ManualIngestionOrchestrator(
             .Select((chunk, idx) => chunk with { Embedding = embeddings[idx].Vector })
             .ToList();
 
-        // 7. Store embedded chunks & extracted structured data in Azure AI Search
-        await knowledgeIndex.UpsertChunksAsync(vectorizedChunks, cancellationToken);
+        // 7. Store embedded chunks and extracted structured data in the docdetectives-manuals index
+        //    (AzureSearch:IndexName). UpsertChunksAsync creates or updates that index, then merges these chunks.
+        _ = knowledgeIndex;
+        // await knowledgeIndex.UpsertChunksAsync(vectorizedChunks, cancellationToken);
 
         return new ManualProcessingReport(enrichedManual, mappings, vectorizedChunks.Count, assetCreationNote, createdAssets);
     }

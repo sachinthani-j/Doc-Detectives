@@ -119,7 +119,8 @@ switch (mode.ToLowerInvariant())
             host.Services,
             manualsFolder,
             options.AutoLinkConfidenceThreshold,
-            options.AutoCreateAssets);
+            options.AutoCreateAssets,
+            options.IngestionParallelism);
         break;
 
     case "chat":
@@ -138,63 +139,78 @@ static async Task RunFullIngestionAsync(
     IServiceProvider services,
     string folderPath,
     double threshold,
-    bool autoCreateAssets)
+    bool autoCreateAssets,
+    int parallelism)
 {
     var orchestrator = services.GetRequiredService<ManualIngestionOrchestrator>();
     var files = orchestrator.GetManualFilesFromFolder(folderPath);
+    var consoleLock = new object();
 
     Console.WriteLine($"Scanning folder: {Path.GetFullPath(folderPath)}");
     Console.WriteLine($"Found {files.Count} document(s) to process.\n");
 
-    for (var i = 0; i < files.Count; i++)
-    {
-        var file = files[i];
-        Console.WriteLine($"[{i + 1}/{files.Count}] Processing '{Path.GetFileName(file)}'...");
-
-        var document = await orchestrator.ProcessDocumentAsync(file, threshold, autoCreateAssets);
-        Console.WriteLine($"  Document Type   : {document.Classification.DocumentType} ({document.Classification.Reason})");
-
-        if (document.Inspection is { } inspection)
+    // Each document still follows the same steps. Several documents run those steps at the same time,
+    // so Content Understanding for the next file starts before the previous file has finished embedding.
+    await Parallel.ForEachAsync(
+        Enumerable.Range(0, files.Count),
+        new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, parallelism) },
+        async (i, _) =>
         {
-            PrintInspection(document.DocumentId, inspection);
-            Console.WriteLine();
-            continue;
-        }
-
-        var report = document.Manual!;
-        var structure = report.ExtractedManual.AssetStructure;
-
-        Console.WriteLine($"  Manual ID       : {report.ExtractedManual.ManualId}");
-        Console.WriteLine($"  Manufacturer    : {report.ExtractedManual.Manufacturer ?? "Unknown"}");
-        Console.WriteLine($"  Equipment Name  : {structure?.EquipmentName ?? "Unknown"}");
-        Console.WriteLine($"  Models          : {string.Join(", ", report.ExtractedManual.ModelNumbers)}");
-        Console.WriteLine($"  Category        : {report.ExtractedManual.EquipmentCategory ?? "Unknown"}");
-
-        if (structure is not null)
-        {
-            Console.WriteLine($"  Extracted Data  : {structure.TechnicalSpecifications.Count} specs, " +
-                              $"{structure.SpareParts.Count} spare parts, {structure.FaultCodes.Count} fault codes, " +
-                              $"{structure.SafetyWarnings.Count} safety warnings");
-        }
-
-        Console.WriteLine($"  Embedded Chunks : {report.EmbeddedChunkCount} vector(s) stored in Azure AI Search");
-
-        if (report.Mappings.Count == 0)
-        {
-            Console.WriteLine("  Asset Matches   : None");
-        }
-        else
-        {
-            foreach (var map in report.Mappings)
+            var file = files[i];
+            lock (consoleLock)
             {
-                Console.WriteLine($"  Asset Match     : [{map.AssetId}] | Score: {map.ConfidenceScore:P0} | Status: {map.Status} | {map.Reasoning}");
+                Console.WriteLine($"[{i + 1}/{files.Count}] Processing '{Path.GetFileName(file)}'...");
             }
-        }
 
-        Console.WriteLine($"  Asset Creation  : {report.AssetCreationNote}");
-        PrintAssetTree(report.CreatedAssets);
-        Console.WriteLine();
-    }
+            var document = await orchestrator.ProcessDocumentAsync(file, threshold, autoCreateAssets);
+
+            lock (consoleLock)
+            {
+                Console.WriteLine($"[{i + 1}/{files.Count}] {Path.GetFileName(file)}");
+                Console.WriteLine($"  Document Type   : {document.Classification.DocumentType} ({document.Classification.Reason})");
+
+                if (document.Inspection is { } inspection)
+                {
+                    PrintInspection(document.DocumentId, inspection);
+                    Console.WriteLine();
+                    return;
+                }
+
+                var report = document.Manual!;
+                var structure = report.ExtractedManual.AssetStructure;
+
+                Console.WriteLine($"  Manual ID       : {report.ExtractedManual.ManualId}");
+                Console.WriteLine($"  Manufacturer    : {report.ExtractedManual.Manufacturer ?? "Unknown"}");
+                Console.WriteLine($"  Equipment Name  : {structure?.EquipmentName ?? "Unknown"}");
+                Console.WriteLine($"  Models          : {string.Join(", ", report.ExtractedManual.ModelNumbers)}");
+                Console.WriteLine($"  Category        : {report.ExtractedManual.EquipmentCategory ?? "Unknown"}");
+
+                if (structure is not null)
+                {
+                    Console.WriteLine($"  Extracted Data  : {structure.TechnicalSpecifications.Count} specs, " +
+                                      $"{structure.SpareParts.Count} spare parts, {structure.FaultCodes.Count} fault codes, " +
+                                      $"{structure.SafetyWarnings.Count} safety warnings");
+                }
+
+                Console.WriteLine($"  Embedded Chunks : {report.EmbeddedChunkCount} vector(s) stored in Azure AI Search");
+
+                if (report.Mappings.Count == 0)
+                {
+                    Console.WriteLine("  Asset Matches   : None");
+                }
+                else
+                {
+                    foreach (var map in report.Mappings)
+                    {
+                        Console.WriteLine($"  Asset Match     : [{map.AssetId}] | Score: {map.ConfidenceScore:P0} | Status: {map.Status} | {map.Reasoning}");
+                    }
+                }
+
+                Console.WriteLine($"  Asset Creation  : {report.AssetCreationNote}");
+                PrintAssetTree(report.CreatedAssets);
+                Console.WriteLine();
+            }
+        });
 
     Console.WriteLine("Ingestion and embedding complete.");
 }
