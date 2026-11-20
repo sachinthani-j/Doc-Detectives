@@ -1,0 +1,198 @@
+@* Streaming Q&A chat with cited sources. The host page decides what is searched through Prepare
+   (all manuals, one asset's manuals, or one document). *@
+@implements IDisposable
+@inject TechnicalManualQaSkill Qa
+@inject IJSRuntime JS
+
+<section class="card chat-card @Class">
+    <div class="chat-head">
+        <div class="grow truncate"><strong>@Title</strong></div>
+        @if (_turns.Count > 0)
+        {
+            <button class="btn btn-ghost btn-sm" @onclick="Clear" disabled="@_busy"><Icon Name="plus" Size="14" /> New chat</button>
+        }
+    </div>
+
+    <div class="chat-scroll" @ref="_scroll">
+        @if (_turns.Count == 0)
+        {
+            <div class="empty" style="margin:auto">
+                <div class="icon-wrap"><Icon Name="chat" /></div>
+                <h3>@EmptyTitle</h3>
+                <p>Answers only use manual content and cite the sections they came from.</p>
+                <div class="suggestions">
+                    @foreach (var s in Suggestions)
+                    {
+                        <button class="suggestion" @onclick="@(() => AskAsync(s))">@s</button>
+                    }
+                </div>
+            </div>
+        }
+
+        @foreach (var turn in _turns)
+        {
+            <div class="msg user"><div class="bubble">@turn.Question</div></div>
+
+            <div class="msg bot">
+                <div class="avatar"><Icon Name="magnifier-doc" Size="16" /></div>
+                <div class="content">
+                    @if (turn.Error is not null)
+                    {
+                        <div class="alert alert-danger"><Icon Name="alert" /> <div>@turn.Error</div></div>
+                    }
+                    else if (turn.Answer.Length == 0 && turn.Streaming)
+                    {
+                        <div class="row subtle"><span class="spinner"></span> @(turn.Sources.Count == 0 ? "Searching…" : "Writing answer…")</div>
+                    }
+                    else
+                    {
+                        <div class="answer @(turn.Streaming ? "typing" : null)">@MarkdownRenderer.ToHtml(turn.Answer.ToString())</div>
+                    }
+
+                    @if (turn.Sources.Count > 0)
+                    {
+                        <div class="sources">
+                            <div class="subtle">Sources</div>
+                            @foreach (var src in turn.Sources)
+                            {
+                                <details class="source">
+                                    <summary>
+                                        <span class="num">@src.Number</span>
+                                        <span class="grow truncate">
+                                            <strong>@src.SectionTitle</strong>
+                                            @if (ShowSourceFile) { <span class="subtle">· @src.FileName</span> }
+                                        </span>
+                                        @if (ShowSourceFile)
+                                        {
+                                            <a class="source-link" href="@UiText.DocumentUrl(src.ManualId)" title="Open document" @onclick:stopPropagation="true">
+                                                <Icon Name="file" Size="14" />
+                                            </a>
+                                        }
+                                    </summary>
+                                    <div class="excerpt">@src.Content</div>
+                                </details>
+                            }
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+    </div>
+
+    <form class="chat-input" @onsubmit="SubmitAsync">
+        <input class="input" style="height:44px" @bind="_question" @bind:event="oninput"
+               placeholder="@Placeholder" aria-label="Question" disabled="@_busy" autocomplete="off" />
+        @if (_busy)
+        {
+            <button type="button" class="btn btn-icon" style="height:44px;width:44px" @onclick="Stop" title="Stop"><Icon Name="stop" /></button>
+        }
+        else
+        {
+            <button type="submit" class="btn btn-primary btn-icon @(string.IsNullOrWhiteSpace(_question) ? "is-empty" : null)" style="height:44px;width:44px" title="Send"><Icon Name="send" /></button>
+        }
+    </form>
+</section>
+
+@code {
+    /// <summary>Finds the sources for a question and builds the prompt (decides the chat's scope).</summary>
+    [Parameter, EditorRequired] public Func<string, CancellationToken, Task<QaContext>> Prepare { get; set; } = default!;
+
+    [Parameter] public string Title { get; set; } = "Conversation";
+    [Parameter] public string EmptyTitle { get; set; } = "Ask anything from the ingested manuals";
+    [Parameter] public string Placeholder { get; set; } = "Ask a question…";
+    [Parameter] public string Class { get; set; } = "";
+
+    /// <summary>Show which document each source came from (off when the chat is about one document).</summary>
+    [Parameter] public bool ShowSourceFile { get; set; } = true;
+
+    [Parameter] public IReadOnlyList<string> Suggestions { get; set; } =
+    [
+        "How do I calibrate it?",
+        "What are the safety warnings?",
+        "Which spare parts are listed?",
+        "What does an error code mean?"
+    ];
+
+    private sealed class Turn
+    {
+        public required string Question { get; init; }
+        public System.Text.StringBuilder Answer { get; } = new();
+        public IReadOnlyList<AnswerSource> Sources { get; set; } = [];
+        public bool Streaming { get; set; } = true;
+        public string? Error { get; set; }
+    }
+
+    private readonly List<Turn> _turns = [];
+    private ElementReference _scroll;
+    private string _question = "";
+    private bool _busy;
+    private CancellationTokenSource? _cts;
+
+    public void Clear()
+    {
+        if (_busy) return;
+        _turns.Clear();
+        StateHasChanged();
+    }
+
+    private Task SubmitAsync() => AskAsync(_question);
+
+    private async Task AskAsync(string question)
+    {
+        question = question.Trim();
+        if (question.Length == 0 || _busy) return;
+
+        var turn = new Turn { Question = question };
+        _turns.Add(turn);
+        _question = "";
+        _busy = true;
+        _cts = new CancellationTokenSource();
+        await ScrollAsync();
+
+        try
+        {
+            var context = await Prepare(question, _cts.Token);
+            turn.Sources = context.Sources;
+            StateHasChanged();
+
+            var lastRender = DateTime.UtcNow;
+            await foreach (var token in Qa.StreamAnswerAsync(context, _cts.Token))
+            {
+                turn.Answer.Append(token);
+                if ((DateTime.UtcNow - lastRender).TotalMilliseconds > 60)
+                {
+                    lastRender = DateTime.UtcNow;
+                    StateHasChanged();
+                    await ScrollAsync();
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            if (turn.Answer.Length == 0) turn.Error = "Stopped.";
+        }
+        catch (Exception ex)
+        {
+            turn.Error = $"Something went wrong: {ex.Message}";
+        }
+        finally
+        {
+            turn.Streaming = false;
+            _busy = false;
+            _cts?.Dispose();
+            _cts = null;
+            StateHasChanged();
+            await ScrollAsync();
+        }
+    }
+
+    private void Stop() => _cts?.Cancel();
+
+    private async Task ScrollAsync()
+    {
+        try { await JS.InvokeVoidAsync("dd.scrollToBottom", _scroll); }
+        catch { /* prerendering or disconnected */ }
+    }
+
+    public void Dispose() => _cts?.Cancel();
+}

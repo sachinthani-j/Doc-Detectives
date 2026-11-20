@@ -43,7 +43,12 @@ public static class UiText
         _ => ("Unmatched", "badge")
     };
 
-    public static string AssetUrl(string assetId) => $"asset?id={Uri.EscapeDataString(assetId)}";
+    public static string AssetUrl(string assetId) => $"assets/view?id={Uri.EscapeDataString(assetId)}";
+
+    public static string DocumentUrl(string manualId) => $"documents/view?id={Uri.EscapeDataString(manualId)}";
+
+    public static string FileBadge(string fileName) =>
+        Path.GetExtension(fileName).TrimStart('.').ToUpperInvariant() is { Length: > 0 } ext ? ext : "DOC";
 
     public static string AskUrl(string? assetId) =>
         string.IsNullOrEmpty(assetId) ? "ask" : $"ask?asset={Uri.EscapeDataString(assetId)}";

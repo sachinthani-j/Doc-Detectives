@@ -72,6 +72,37 @@ public sealed class TechnicalManualQaSkill(
         return new QaContext(asset, sources, BuildPrompt(asset, sources, question), null);
     }
 
+    /// <summary>Like <see cref="PrepareAsync"/>, but answers only from one document (manual).</summary>
+    public async Task<QaContext> PrepareForManualAsync(
+        string manualId,
+        string fileName,
+        string question,
+        int topK = 6,
+        CancellationToken cancellationToken = default)
+    {
+        var queryEmbeddings = await embeddingGenerator.GenerateAsync(
+            [question],
+            cancellationToken: cancellationToken);
+
+        var chunks = await knowledgeIndex.SearchByManualAsync(
+            manualId,
+            queryEmbeddings[0].Vector,
+            question,
+            topK,
+            cancellationToken);
+
+        if (chunks.Count == 0)
+        {
+            return new QaContext(null, [], null, $"No sections of {fileName} matched this question.");
+        }
+
+        var sources = chunks
+            .Select((c, i) => new AnswerSource(i + 1, c.ManualId, c.FileName, c.SectionTitle, c.Content))
+            .ToList();
+
+        return new QaContext(null, sources, BuildPrompt(null, sources, question, fileName), null);
+    }
+
     /// <summary>Streams the answer text for a prepared context.</summary>
     public async IAsyncEnumerable<string> StreamAnswerAsync(
         QaContext context,
@@ -107,13 +138,21 @@ public sealed class TechnicalManualQaSkill(
         return response.Text ?? "No response generated.";
     }
 
-    private static string BuildPrompt(Asset? asset, IReadOnlyList<AnswerSource> sources, string question)
+    private static string BuildPrompt(
+        Asset? asset,
+        IReadOnlyList<AnswerSource> sources,
+        string question,
+        string? documentFileName = null)
     {
         var excerpts = string.Join("\n\n---\n\n", sources.Select(s =>
             $"[{s.Number}] {s.FileName} | Section: {s.SectionTitle}\n{s.Content}"));
 
         var target = new StringBuilder();
-        if (asset is null)
+        if (documentFileName is not null)
+        {
+            target.AppendLine($"The technician is reading the document '{documentFileName}'; all excerpts come from it.");
+        }
+        else if (asset is null)
         {
             target.AppendLine("No specific asset was selected; the excerpts may come from different manuals.");
         }

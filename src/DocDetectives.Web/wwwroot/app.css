@@ -474,3 +474,44 @@ h1:focus { outline: none; }
 .char { display: flex; justify-content: space-between; gap: .6rem; padding: .4rem .65rem; border-radius: var(--radius-sm); background: var(--surface-2); font-size: .85rem; }
 .char-name { color: var(--text-2); }
 .char-val { font-weight: 600; text-align: right; }
+
+/* ============================================================
+   Documents: viewer + chat
+   ============================================================ */
+.page-wide { max-width: 1480px; }
+.doc-layout { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(340px, 1fr); gap: 1.25rem; align-items: start; }
+.doc-viewer { display: flex; flex-direction: column; height: calc(100vh - 210px); min-height: 520px; overflow: hidden; }
+.doc-frame { flex: 1; width: 100%; border: 0; background: var(--surface-2); }
+.doc-frame.image { overflow: auto; display: flex; align-items: flex-start; justify-content: center; padding: 1rem; }
+.doc-frame.image img { max-width: 100%; height: auto; border-radius: var(--radius-sm); box-shadow: var(--shadow); }
+.doc-chat { height: calc(100vh - 210px); min-height: 520px; }
+
+.tabs { display: flex; gap: .25rem; padding: .5rem .6rem 0; border-bottom: 1px solid var(--border); }
+.tabs button {
+    border: none; background: none; font: inherit; font-size: .9rem; font-weight: 550; color: var(--text-2);
+    padding: .5rem .8rem; border-bottom: 2px solid transparent; margin-bottom: -1px; cursor: pointer;
+}
+.tabs button:hover { color: var(--text); }
+.tabs button.on { color: var(--accent-text); border-bottom-color: var(--accent); }
+
+.section-list { margin: 0; padding: 1rem 1.25rem 1rem 2.6rem; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: .35rem; font-size: .9rem; }
+.section-list li::marker { color: var(--text-3); }
+
+.chat-head { display: flex; align-items: center; gap: .75rem; padding: .7rem 1rem; border-bottom: 1px solid var(--border); min-height: 50px; }
+.source-link { display: flex; color: var(--text-3); padding: .15rem; border-radius: 4px; }
+.source-link:hover { color: var(--accent-text); background: var(--accent-soft); }
+.file-link { color: inherit; }
+.file-link:hover { background: var(--surface-2); text-decoration: none; }
+a.tag:hover { border-color: var(--accent); color: var(--accent-text); text-decoration: none; }
+
+@media (max-width: 1000px) {
+    .doc-layout { grid-template-columns: 1fr; }
+    .doc-viewer { height: 70vh; }
+    .doc-chat { height: 70vh; }
+}
+
+/* Long ids (e.g. AUTO-BRAND-GMBH-…) stay on one line and truncate; the full id shows on hover. */
+.tag { white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+.doc-name { max-width: 380px; }
+/* Send stays enabled (a disabled submit button blocks Enter); it only looks muted while the box is empty. */
+.btn.is-empty { opacity: .55; }

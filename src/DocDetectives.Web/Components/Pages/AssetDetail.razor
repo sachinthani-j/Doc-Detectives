@@ -1,3 +1,4 @@
+@page "/assets/view"
 @page "/asset"
 @inject IAssetCatalogGateway Catalog
 @inject IKnowledgeIndex Knowledge
@@ -82,13 +83,14 @@
                     <div class="file-list">
                         @foreach (var m in _manuals)
                         {
-                            <div class="file-row">
+                            <a class="file-row file-link" href="@UiText.DocumentUrl(m.ManualId)">
                                 <span class="file-icon">@Ext(m.FileName)</span>
                                 <div class="grow">
                                     <div class="truncate" style="font-weight:550">@m.FileName</div>
                                     <div class="subtle">@m.SectionCount indexed section@(m.SectionCount == 1 ? "" : "s")</div>
                                 </div>
-                            </div>
+                                <span class="subtle nowrap">Open <Icon Name="arrow-right" Size="14" /></span>
+                            </a>
                         }
                     </div>
                 }

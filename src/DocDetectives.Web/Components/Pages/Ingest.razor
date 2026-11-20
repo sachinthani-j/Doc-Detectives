@@ -361,7 +361,7 @@
 
                         @if (report.Mappings.FirstOrDefault(m => m.Status is MappingStatus.AutoLinked or MappingStatus.Created) is { } linked)
                         {
-                            <div><a class="btn btn-sm btn-primary" href="@UiText.AskUrl(linked.AssetId)"><Icon Name="chat" Size="14" /> Ask about @linked.AssetId</a></div>
+                            <div class="row wrap"><a class="btn btn-sm btn-primary" href="@UiText.AskUrl(linked.AssetId)"><Icon Name="chat" Size="14" /> Ask about @linked.AssetId</a><a class="btn btn-sm" href="@UiText.DocumentUrl(manual.ManualId)"><Icon Name="file" Size="14" /> Open document</a></div>
                         }
                     </div>
                 }

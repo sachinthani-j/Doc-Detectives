@@ -1,0 +1,159 @@
+@page "/documents/view"
+@inject IKnowledgeIndex Knowledge
+@inject IngestionJobService Jobs
+@inject TechnicalManualQaSkill Qa
+
+<PageTitle>@(_doc?.FileName ?? "Document") · Doc Detectives</PageTitle>
+
+<div class="page page-wide">
+    <a class="btn btn-ghost btn-sm" href="documents" style="margin-bottom:1rem"><Icon Name="arrow-left" Size="15" /> Documents</a>
+
+    @if (_loading)
+    {
+        <div class="card card-pad stack-sm">
+            <div class="skeleton" style="width:45%;height:22px"></div>
+            <div class="skeleton" style="width:25%"></div>
+        </div>
+    }
+    else if (_error is not null)
+    {
+        <div class="alert alert-danger"><Icon Name="alert" /> <div>@_error</div></div>
+    }
+    else if (_doc is null)
+    {
+        <div class="card">
+            <div class="empty">
+                <div class="icon-wrap"><Icon Name="file" /></div>
+                <h3>Document not found</h3>
+                <p>No ingested document has the id <span class="mono">@Id</span>.</p>
+            </div>
+        </div>
+    }
+    else
+    {
+        <div class="page-head" style="margin-bottom:1rem">
+            <div class="row grow" style="min-width:0;align-items:flex-start">
+                <span class="file-icon" style="width:40px;height:40px;font-size:.7rem">@UiText.FileBadge(_doc.FileName)</span>
+                <div class="grow" style="min-width:0">
+                    <h1 class="truncate" title="@_doc.FileName" style="font-size:1.35rem">@_doc.FileName</h1>
+                    <div class="row wrap" style="gap:.4rem;margin-top:.4rem">
+                        <span class="badge">@_doc.SectionCount sections</span>
+                        @if (_doc.AssetIds is { Count: > 0 } ids)
+                        {
+                            <span class="subtle">Linked to</span>
+                            @foreach (var id in ids)
+                            {
+                                <a class="tag" href="@UiText.AssetUrl(id)" title="@id">@id</a>
+                            }
+                        }
+                        else
+                        {
+                            <span class="badge badge-warn">Not linked to an asset</span>
+                        }
+                    </div>
+                </div>
+            </div>
+            @if (_fileAvailable)
+            {
+                <div class="row">
+                    <a class="btn btn-sm" href="@DocumentFileEndpoints.FileUrl(_doc.ManualId)" target="_blank" rel="noopener"><Icon Name="arrow-right" Size="14" /> Open in new tab</a>
+                    <a class="btn btn-sm" href="@DocumentFileEndpoints.FileUrl(_doc.ManualId, download: true)"><Icon Name="upload" Size="14" Stroke="1.8" /> Download</a>
+                </div>
+            }
+        </div>
+
+        <div class="doc-layout">
+            <section class="card doc-viewer">
+                <div class="tabs" role="tablist">
+                    <button role="tab" class="@(_tab == "preview" ? "on" : null)" aria-selected="@(_tab == "preview" ? "true" : "false")" @onclick="@(() => _tab = "preview")">Preview</button>
+                    <button role="tab" class="@(_tab == "sections" ? "on" : null)" aria-selected="@(_tab == "sections" ? "true" : "false")" @onclick="@(() => _tab = "sections")">
+                        Sections <span class="subtle">@(_doc.SectionTitles?.Count ?? 0)</span>
+                    </button>
+                </div>
+
+                @if (_tab == "sections")
+                {
+                    <ol class="section-list">
+                        @foreach (var title in _doc.SectionTitles ?? [])
+                        {
+                            <li>@title</li>
+                        }
+                    </ol>
+                }
+                else if (!_fileAvailable)
+                {
+                    <div class="empty">
+                        <div class="icon-wrap"><Icon Name="file" /></div>
+                        <h3>Preview unavailable</h3>
+                        <p>The original file <span class="mono">@_doc.FileName</span> is not in the manuals folder.<br />You can still ask questions about it.</p>
+                    </div>
+                }
+                else if (DocumentFileEndpoints.IsImage(_doc.FileName))
+                {
+                    <div class="doc-frame image"><img src="@DocumentFileEndpoints.FileUrl(_doc.ManualId)" alt="@_doc.FileName" /></div>
+                }
+                else if (DocumentFileEndpoints.CanPreview(_doc.FileName))
+                {
+                    <iframe class="doc-frame" src="@DocumentFileEndpoints.FileUrl(_doc.ManualId)" title="Preview of @_doc.FileName"></iframe>
+                }
+                else
+                {
+                    <div class="empty">
+                        <div class="icon-wrap"><Icon Name="file" /></div>
+                        <h3>No preview for @UiText.FileBadge(_doc.FileName) files</h3>
+                        <p>Browsers can't show this file type inline.</p>
+                        <p style="margin-top:1rem"><a class="btn btn-sm" href="@DocumentFileEndpoints.FileUrl(_doc.ManualId, download: true)">Download</a></p>
+                    </div>
+                }
+            </section>
+
+            <ChatPanel Class="doc-chat"
+                       Prepare="PrepareAsync"
+                       Title="Chat about this document"
+                       EmptyTitle="Ask about this document"
+                       Placeholder="Ask a question about this document…"
+                       ShowSourceFile="false"
+                       Suggestions="Suggestions" />
+        </div>
+    }
+</div>
+
+@code {
+    [SupplyParameterFromQuery(Name = "id")] public string? Id { get; set; }
+
+    private static readonly IReadOnlyList<string> Suggestions =
+    [
+        "Summarise this document",
+        "What maintenance does it describe?",
+        "List the safety warnings",
+        "Which spare parts are mentioned?"
+    ];
+
+    private ManualReference? _doc;
+    private bool _fileAvailable;
+    private bool _loading = true;
+    private string? _error;
+    private string _tab = "preview";
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _loading = true;
+        _error = null;
+        try
+        {
+            _doc = string.IsNullOrWhiteSpace(Id) ? null : await Knowledge.GetManualAsync(Id);
+            _fileAvailable = _doc is not null && DocumentFileEndpoints.ResolvePath(Jobs.ManualsFolder, _doc.FileName) is not null;
+        }
+        catch (Exception ex)
+        {
+            _error = $"Could not load the document: {ex.Message}";
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private Task<QaContext> PrepareAsync(string question, CancellationToken cancellationToken) =>
+        Qa.PrepareForManualAsync(_doc!.ManualId, _doc.FileName, question, cancellationToken: cancellationToken);
+}
