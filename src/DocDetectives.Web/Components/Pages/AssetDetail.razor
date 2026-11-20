@@ -2,6 +2,7 @@
 @page "/asset"
 @inject IAssetCatalogGateway Catalog
 @inject IKnowledgeIndex Knowledge
+@inject IPmModelGateway PmModels
 
 <PageTitle>@(_asset?.Name ?? "Asset") · Doc Detectives</PageTitle>
 
@@ -66,6 +67,18 @@
             }
 
             <div class="card">
+                <div class="card-head"><h2>Periodical maintenance</h2></div>
+                @if (_pmError is not null)
+                {
+                    <div class="card-body"><div class="alert alert-danger"><Icon Name="alert" /> <div>@_pmError</div></div></div>
+                }
+                else
+                {
+                    <PmModelList Models="_pmModels" AssetId="@_asset.Id" />
+                }
+            </div>
+
+            <div class="card">
                 <div class="card-head">
                     <h2>Linked manuals</h2>
                     <a class="btn btn-sm" href="upload"><Icon Name="plus" Size="14" /> Upload a manual</a>
@@ -84,7 +97,7 @@
                         @foreach (var m in _manuals)
                         {
                             <a class="file-row file-link" href="@UiText.DocumentUrl(m.ManualId)">
-                                <span class="file-icon">@Ext(m.FileName)</span>
+                                <FileIcon FileName="@m.FileName" />
                                 <div class="grow">
                                     <div class="truncate" style="font-weight:550">@m.FileName</div>
                                     <div class="subtle">@m.SectionCount indexed section@(m.SectionCount == 1 ? "" : "s")</div>
@@ -106,6 +119,8 @@
     private IReadOnlyList<ManualReference> _manuals = [];
     private IReadOnlyList<Asset> _children = [];
     private Asset? _parent;
+    private IReadOnlyList<PmModel> _pmModels = [];
+    private string? _pmError;
 
     // The asset itself as the tree root (shown without its parent link), followed by its direct children.
     private IReadOnlyList<Asset> TreeAssets =>
@@ -140,7 +155,9 @@
                 ? Task.FromResult<Asset?>(null)
                 : Catalog.GetAssetByIdAsync(_asset.ParentAssetId);
 
-            await Task.WhenAll(manuals, children, parent);
+            var pmModels = LoadPmModelsAsync(_asset.Id);
+
+            await Task.WhenAll(manuals, children, parent, pmModels);
             _manuals = manuals.Result;
             _children = children.Result;
             _parent = parent.Result;
@@ -155,6 +172,15 @@
         }
     }
 
-    private static string Ext(string fileName) =>
-        Path.GetExtension(fileName).TrimStart('.').ToUpperInvariant() is { Length: > 0 } e ? e : "DOC";
+    // Loaded on its own, so a PM model index problem never hides the rest of the asset page.
+    private async Task LoadPmModelsAsync(string assetId)
+    {
+        _pmError = null;
+        try { _pmModels = await PmModels.GetForAssetAsync(assetId); }
+        catch (Exception ex)
+        {
+            _pmModels = [];
+            _pmError = $"Could not load the PM models: {ex.Message}";
+        }
+    }
 }

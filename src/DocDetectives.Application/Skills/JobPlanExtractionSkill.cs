@@ -4,8 +4,8 @@ using Microsoft.Extensions.AI;
 namespace DocDetectives.Application.Skills;
 
 /// <summary>
-/// Drafts job plans (the "what to do" of preventive maintenance) from a manual's maintenance schedule
-/// or from an inspection document's checklist.
+/// Drafts PM models for Ultimo (the "what to do" of preventive maintenance) from a manual's maintenance schedule
+/// or from an inspection document's checklist. For a manual it first decides whether the equipment needs PM models.
 /// </summary>
 public sealed class JobPlanExtractionSkill(IChatClient chatClient)
 {
@@ -17,7 +17,7 @@ public sealed class JobPlanExtractionSkill(IChatClient chatClient)
         CancellationToken cancellationToken = default)
     {
         var prompt = $$"""
-            You are a maintenance planner. Draft job plans from the document below, following the rules.
+            You are a maintenance planner for Ultimo. Draft PM models from the document below, following the rules.
             Also return the document's own code (DocumentCode, e.g. "JD-PL3-PREV-DRO-001" or "1-365-PK-00030-BL"),
             the materials and tools needed (Materials) and general safety notes (SafetyNotes).
             For an inspection document, also fill InspectedAsset with exactly what the document states about the
@@ -26,7 +26,7 @@ public sealed class JobPlanExtractionSkill(IChatClient chatClient)
 
             DOCUMENT TYPE: {{documentType}}
 
-            JOB PLAN RULES:
+            PM MODEL RULES:
             {{JobPlanRules}}
 
             FILE NAME: {{document.FileName}}

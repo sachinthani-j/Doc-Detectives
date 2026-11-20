@@ -1,0 +1,67 @@
+@* Periodical maintenance of one asset: its PM models; a model expands to its PM jobs and their lines. *@
+
+@if (Models.Count == 0)
+{
+    <div class="empty">
+        <div class="icon-wrap"><Icon Name="file" /></div>
+        <h3>No PM models yet</h3>
+        <p>Ingest a manual for this asset and approve its drafted PM model to create one here.</p>
+    </div>
+}
+else
+{
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr><th>PM model</th><th>Description</th><th>Frequency</th><th class="hide-sm">PM jobs</th><th class="hide-sm">Source</th><th></th></tr>
+            </thead>
+            <tbody>
+                @foreach (var model in Models)
+                {
+                    var expanded = _expanded.Contains(model.Id);
+                    <tr class="clickable" @onclick="@(() => Toggle(model.Id))">
+                        <td class="nowrap"><span class="tag" title="@model.Id">@model.Id</span></td>
+                        <td>
+                            <div class="asset-name">@model.Description</div>
+                            @if (model.AssetId != AssetId)
+                            {
+                                <div class="subtle">On <a class="mono" href="@UiText.AssetUrl(model.AssetId)" @onclick:stopPropagation>@model.AssetId</a></div>
+                            }
+                        </td>
+                        <td class="nowrap">@Frequency(model)</td>
+                        <td class="hide-sm">@model.Jobs.Count</td>
+                        <td class="hide-sm subtle">@model.SourceFileName</td>
+                        <td class="nowrap"><span class="btn btn-ghost btn-sm">@(expanded ? "Hide" : "View")</span></td>
+                    </tr>
+                    @if (expanded)
+                    {
+                        <tr>
+                            <td colspan="6" style="background:var(--surface-2)">
+                                <PmJobList Jobs="model.Jobs" />
+                            </td>
+                        </tr>
+                    }
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<PmModel> Models { get; set; } = [];
+
+    /// <summary>The asset whose page this is; models on another asset (its parent) say so.</summary>
+    [Parameter, EditorRequired] public string AssetId { get; set; } = "";
+
+    private readonly HashSet<string> _expanded = [];
+
+    private void Toggle(string id)
+    {
+        if (!_expanded.Remove(id)) _expanded.Add(id);
+    }
+
+    private static string Frequency(PmModel model) =>
+        model.FrequencyNumber is { } n && !string.IsNullOrWhiteSpace(model.FrequencyUnit) ? $"{n} {model.FrequencyUnit}"
+        : !string.IsNullOrWhiteSpace(model.Frequency) ? model.Frequency
+        : "Not set";
+}

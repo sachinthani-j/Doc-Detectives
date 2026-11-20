@@ -1,6 +1,17 @@
-# Job plan rules
+# PM model rules
 
-A job plan is the list of steps a technician carries out during one preventive maintenance visit.
+A PM model is the recurring preventive maintenance of one asset in Ultimo. Each plan you return becomes one PM model:
+the list of steps a technician carries out during one preventive maintenance visit at one interval.
+
+## Does this equipment need PM models? (manuals only)
+Decide first, from the manual, and fill PmModelNeeded (true/false) with a one-sentence PmModelReason.
+- **Create** PM models for equipment that is part of the production process, has several maintainable components
+  and needs recurring maintenance.
+- **Leave out** simple, standalone or support equipment whose failure has little impact, as well as maintenance-free,
+  consumable, single-check or cheap items with a backup.
+- **When in doubt, leave it out.**
+When PmModelNeeded is false, return no plans. Use your judgement from the manual. Refer to the system as Ultimo.
+For an inspection document, leave PmModelNeeded and PmModelReason null.
 
 ## Which plans to create
 - **Manual:** use only the maintenance, lubrication, inspection and cleaning schedules (e.g. "Onderhoudsschema", "Maintenance schedule"). Create one plan per interval (daily, weekly, every 500 operating hours, yearly, ...). Ignore installation, operation and troubleshooting. If the manual has no recurring maintenance, return no plans.
@@ -16,4 +27,4 @@ A job plan is the list of steps a technician carries out during one preventive m
 - Do not invent steps, values or intervals. Keep the document's language.
 
 ## Interval
-Fill Interval with the frequency as written (e.g. "4 W", "every 500 operating hours", "yearly") and IntervalValue + IntervalUnit (Hours, Days, Weeks, Months, Years) when it can be expressed that way. Leave them null when the document gives no frequency.
+Fill Interval with the frequency as written (e.g. "4 W", "every 500 operating hours", "yearly") and IntervalValue + IntervalUnit (Hours, Days, Weeks, Months, Years) when it can be expressed that way. Leave them null when the document gives no frequency: never invent intervals.

@@ -30,10 +30,10 @@ public static class DependencyInjection
         // 1. Azure AI Content Understanding extractor (Microsoft Foundry)
         services.AddHttpClient<IManualExtractor, AzureContentUnderstandingExtractor>();
 
-        // 2. Asset catalog, jobs, job plans & characteristics (Azure AI Search) and MCP tools
+        // 2. Asset catalog, jobs, PM models & characteristics (Azure AI Search) and MCP tools
         services.AddSingleton<IAssetCatalogGateway, AzureAiSearchAssetCatalogGateway>();
         services.AddSingleton<IJobGateway, AzureAiSearchJobGateway>();
-        services.AddSingleton<IJobPlanGateway, AzureAiSearchJobPlanGateway>();
+        services.AddSingleton<IPmModelGateway, AzureAiSearchPmModelGateway>();
         services.AddSingleton<ICharacteristicCatalog, AzureAiSearchCharacteristicCatalog>();
         services.AddSingleton<AssetSystemMcpTools>();
 

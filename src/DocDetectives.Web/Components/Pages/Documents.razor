@@ -84,7 +84,7 @@
                                 <tr class="clickable" @onclick="@(() => Nav.NavigateTo(UiText.DocumentUrl(d.ManualId)))">
                                     <td>
                                         <div class="row" style="gap:.65rem">
-                                            <span class="file-icon">@UiText.FileBadge(d.FileName)</span>
+                                            <FileIcon FileName="@d.FileName" />
                                             <div class="grow">
                                                 <div class="asset-name truncate doc-name" title="@d.FileName">@d.FileName</div>
                                                 @if (!onDisk) { <div class="subtle">File not in the manuals folder; preview unavailable</div> }

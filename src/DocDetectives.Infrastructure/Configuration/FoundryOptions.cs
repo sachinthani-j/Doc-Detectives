@@ -1,4 +1,4 @@
-﻿namespace DocDetectives.Infrastructure.Configuration;
+namespace DocDetectives.Infrastructure.Configuration;
 
 public sealed class DocDetectivesOptions
 {
@@ -82,7 +82,7 @@ public sealed class AzureSearchOptions
     public string IndexName { get; set; } = "docdetectives-manuals";
     public string AssetsIndexName { get; set; } = "assets";
     public string JobsIndexName { get; set; } = "docdetectives-jobs";
-    public string JobPlansIndexName { get; set; } = "docdetectives-jobplans";
+    public string PmModelsIndexName { get; set; } = "docdetectives-pmmodels";
     public string CharacteristicsIndexName { get; set; } = "docdetectives-characteristics";
     public string AssetKeyField { get; set; } = "key";
     public string AssetIdField { get; set; } = "assetId";

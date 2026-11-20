@@ -2,6 +2,7 @@
 @page "/ingest"
 @implements IDisposable
 @inject IngestionJobService Jobs
+@inject IAssetCatalogGateway Catalog
 
 <PageTitle>Upload manuals · Doc Detectives</PageTitle>
 
@@ -60,7 +61,7 @@
                     {
                         var busy = Jobs.IsQueuedOrRunning(f.FullName);
                         <div class="file-row">
-                            <span class="file-icon">@f.Extension.TrimStart('.').ToUpperInvariant()</span>
+                            <FileIcon FileName="@f.Name" />
                             <div class="grow">
                                 <div class="truncate" style="font-weight:550" title="@f.Name">@f.Name</div>
                                 <div class="subtle">@UiText.Size(f.Length)</div>
@@ -99,7 +100,7 @@
             var open = IsOpen(job);
             <div class="job">
                 <div class="job-head">
-                    <span class="file-icon">@Path.GetExtension(job.FileName).TrimStart('.').ToUpperInvariant()</span>
+                    <FileIcon FileName="@job.FileName" />
                     <div class="grow">
                         <div class="truncate" style="font-weight:600">@job.FileName</div>
                         <div class="subtle">
@@ -348,7 +349,15 @@
                                     </div>
                                     <div class="grow">
                                         <div class="row wrap" style="gap:.5rem">
-                                            <a class="mono" href="@UiText.AssetUrl(m.AssetId)">@m.AssetId</a>
+                                            @if (AssetName(report, m.AssetId) is { } name)
+                                            {
+                                                <a class="match-name" href="@UiText.AssetUrl(m.AssetId)">@name</a>
+                                                <span class="tag" title="@m.AssetId">@m.AssetId</span>
+                                            }
+                                            else
+                                            {
+                                                <a class="mono" href="@UiText.AssetUrl(m.AssetId)">@m.AssetId</a>
+                                            }
                                             <span class="@badge.Item2">@badge.Item1</span>
                                         </div>
                                         <div class="subtle" style="margin-top:.2rem">@m.Reasoning</div>
@@ -440,6 +449,40 @@
     private string? _approveError;
     private bool _uploading;
     private bool _dragging;
+
+    // Asset names for the matched asset IDs, loaded after rendering (the matches only carry the ID).
+    private readonly Dictionary<string, string> _assetNames = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _namesRequested = new(StringComparer.Ordinal);
+
+    // A created or proposed asset is in the report already; an existing one comes from the catalog.
+    private string? AssetName(ManualProcessingReport report, string assetId) =>
+        _assetNames.GetValueOrDefault(assetId)
+        ?? report.CreatedAssets.Concat(report.ProposedAssets)
+            .FirstOrDefault(a => a.Id == assetId && !string.IsNullOrWhiteSpace(a.Name))?.Name;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        var missing = _jobs
+            .SelectMany(j => j.Report?.Mappings ?? [])
+            .Select(m => m.AssetId)
+            .Where(id => _namesRequested.Add(id))
+            .ToList();
+        if (missing.Count == 0) return;
+
+        var assets = await Task.WhenAll(missing.Select(async id =>
+        {
+            try { return await Catalog.GetAssetByIdAsync(id); }
+            catch { return null; } // the name is a nicety: the ID is still shown
+        }));
+
+        var found = false;
+        foreach (var asset in assets.OfType<Asset>().Where(a => !string.IsNullOrWhiteSpace(a.Name)))
+        {
+            _assetNames[asset.Id] = asset.Name;
+            found = true;
+        }
+        if (found) StateHasChanged();
+    }
 
     protected override void OnInitialized()
     {

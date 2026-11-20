@@ -1,4 +1,4 @@
-@* Review step for one processed document: approve or reject the proposed new assets, then each drafted job plan.
+@* Review step for one processed document: approve or reject the proposed new assets, then each drafted PM model (PM jobs with their lines).
    Mirrors the console's AssetProposalReview / JobPlanReview (without editing). Nothing is written until approved. *@
 @inject IngestionJobService Jobs
 
@@ -88,86 +88,144 @@
 @if (Doc.JobPlans is { } plans)
 {
     <div class="stack-sm">
-        <h3>Job plans</h3>
-        <p class="subtle">@plans.Note</p>
-        @if (plans.Plans.Count > 0 && !IngestionJobService.CanReviewPlans(Job))
+        <h3>PM models</h3>
+        @if (plans.Plans.Count == 0)
         {
-            <div class="alert alert-info"><Icon Name="alert" /> <div>Decide on the new asset proposal first, so plans only link to assets that exist.</div></div>
+            // Same header as when PM models were found, in grey, with the reason underneath.
+            <div class="pm-group empty">
+                <div class="pm-group-head">
+                    <span class="pm-group-icon"><Icon Name="layers" Size="18" /></span>
+                    <div class="grow">
+                        <div class="pm-group-title">No PM models identified for this asset</div>
+                        <div class="subtle">@NoPmReason(plans.Note)</div>
+                    </div>
+                </div>
+            </div>
         }
-
-        @foreach (var plan in plans.Plans)
+        else
         {
-            var decision = Job.PlanDecision(plan);
-            var expanded = _expandedPlans.Contains(plan.Id);
+            // Only a summary at first; the PM models, PM jobs and lines are shown when asked for.
+            var pending = plans.Plans.Count(p => Job.PlanDecision(p) == ReviewDecision.Pending);
+            var targets = Job.PmModelAssetIds(plans.Plans[0]);
+            <div class="pm-group @(_showPlans ? "open" : null)">
+                <div class="pm-group-head">
+                    <span class="pm-group-icon"><Icon Name="file" Size="18" /></span>
+                    <div class="grow">
+                        <div class="pm-group-title">
+                            We identified @plans.Plans.Count PM model(s) that can be created
+                            @if (targets.Count == 1) { <span>for asset <a class="mono" href="@UiText.AssetUrl(targets[0])">@targets[0]</a></span> }
+                            else if (targets.Count > 1) { <span>for each of @targets.Count assets</span> }
+                        </div>
+                        @if (targets.Count > 1)
+                        {
+                            <div class="pm-group-assets">
+                                @foreach (var t in targets) { <a class="tag" href="@UiText.AssetUrl(t)" title="@t">@t</a> }
+                            </div>
+                        }
+                        @if (Job.PmModelsWaitForSelection)
+                        {
+                            <div class="subtle">Save the asset selection above to choose which assets get these PM models.</div>
+                        }
+                        <div class="subtle">
+                            @plans.Plans.Sum(p => p.Lines.Count) line(s) in total
+                            · @(pending == 0 ? "all reviewed" : $"{pending} waiting for your review")
+                        </div>
+                    </div>
+                    <button class="btn btn-sm @(_showPlans ? null : "btn-primary")" @onclick="@(() => _showPlans = !_showPlans)">
+                        @(_showPlans ? "Hide PM models" : "Show PM models")
+                    </button>
+                </div>
+
+                @if (_showPlans)
+                {
+                    <div class="pm-group-body">
+                        @if (Job.PmModelsWaitForSelection)
+                        {
+                            <div class="alert alert-info"><Icon Name="alert" /> <div>Save the asset selection first: each PM model is created on every selected asset.</div></div>
+                        }
+                        else if (!IngestionJobService.CanReviewPlans(Job))
+                        {
+                            <div class="alert alert-info"><Icon Name="alert" /> <div>Decide on the new asset proposal first, so PM models only link to assets that exist.</div></div>
+                        }
+
+                        @foreach (var draft in plans.Plans)
+                        {
+            var decision = Job.PlanDecision(draft);
+            var expanded = _expandedPlans.Contains(draft.Id);
+            // What approving creates: the PM model with one PM job per piece of equipment.
+            // Same PM jobs and lines on every linked asset, so the first one shows what each asset gets.
+            var preview = Job.CreatedPmModels.GetValueOrDefault(draft.Id)?.FirstOrDefault()
+                          ?? PmModelBuilder.Build(draft with { AssetId = draft.AssetId ?? Job.PmModelAssetIds(draft).FirstOrDefault() });
             <div class="review-card @(decision == ReviewDecision.Pending ? "pending" : null)">
                 <div class="review-head">
+                    <span class="pm-model-icon"><Icon Name="layers" Size="18" /></span>
                     <div class="grow">
-                        <div style="font-weight:600">@plan.Title</div>
-                        <div class="subtle">
-                            @plan.Lines.Count line(s)
-                            @if (!string.IsNullOrWhiteSpace(plan.Interval)) { <span> · every @plan.Interval</span> }
-                            @if (plan.AssetId is not null) { <span> · asset <a class="mono" href="@UiText.AssetUrl(plan.AssetId)">@plan.AssetId</a></span> }
+                        <div class="pm-model-title">@draft.Title</div>
+                        <div class="pm-model-meta">
+                            <span class="tag" title="@draft.Id">@draft.Id</span>
+                            @if (!string.IsNullOrWhiteSpace(draft.Interval)) { <span class="pm-pill freq"><Icon Name="clock" Size="13" /> @Every(draft.Interval)</span> }
+                            <span class="pm-pill">@(preview?.Jobs.Count ?? 0) PM job(s)</span>
+                            <span class="pm-pill insp"><Icon Name="clipboard" Size="13" /> @draft.Lines.Count(l => l.LineType == JobPlanLineType.Inspection)</span>
+                            @if (draft.Lines.Any(l => l.LineType == JobPlanLineType.Task)) { <span class="pm-pill task"><Icon Name="wrench" Size="13" /> @draft.Lines.Count(l => l.LineType == JobPlanLineType.Task)</span> }
+                            @{ var draftTargets = Job.PmModelAssetIds(draft); }
+                            @if (draftTargets.Count == 1) { <a class="subtle mono" href="@UiText.AssetUrl(draftTargets[0])">@draftTargets[0]</a> }
+                            else if (draftTargets.Count > 1) { <span class="subtle">on @draftTargets.Count assets</span> }
                         </div>
                     </div>
                     <DecisionBadge Decision="decision" />
-                    <button class="btn btn-ghost btn-sm" @onclick="@(() => TogglePlan(plan.Id))">@(expanded ? "Hide" : "Show lines")</button>
+                    <button class="btn btn-sm pm-toggle @(expanded ? "on" : null)" aria-expanded="@(expanded ? "true" : "false")" @onclick="@(() => TogglePlan(draft.Id))">
+                        @(expanded ? "Hide PM jobs" : "PM jobs") <span class="pm-chevron"><Icon Name="chevron-down" Size="15" /></span>
+                    </button>
                 </div>
 
-                @if (expanded)
+                @if (expanded && preview is not null)
                 {
-                    @if (plan.Materials.Count > 0)
-                    {
-                        <p class="subtle"><strong>Materials:</strong> @string.Join(", ", plan.Materials)</p>
-                    }
-                    @if (plan.SafetyNotes.Count > 0)
-                    {
-                        <ul class="warning-list">
-                            @foreach (var note in plan.SafetyNotes)
+                    <PmJobList Jobs="preview.Jobs" />
+                }
+
+                @if (decision == ReviewDecision.Approved && Job.CreatedPmModels.GetValueOrDefault(draft.Id) is { Count: > 0 } created)
+                {
+                    <div class="subtle">
+                        <Icon Name="check" Size="14" /> Created @created.Count PM model(s):
+                        <ul class="pm-created">
+                            @foreach (var pm in created)
                             {
-                                <li><span class="warn-icon"><Icon Name="alert" Size="15" /></span><span>@note</span></li>
+                                <li>
+                                    <span class="mono">@pm.Id</span> on <a class="mono" href="@UiText.AssetUrl(pm.AssetId)">@pm.AssetId</a>
+                                    · @pm.Jobs.Count PM job(s), @pm.Jobs.Sum(j => j.Lines.Count) line(s)
+                                </li>
                             }
                         </ul>
-                    }
-                    <div class="card table-wrap detail-panel">
-                        <table class="table">
-                            <thead><tr><th>#</th><th>Line</th><th>Type</th><th class="hide-sm">Equipment</th><th class="hide-sm">Record</th></tr></thead>
-                            <tbody>
-                                @foreach (var line in plan.Lines)
-                                {
-                                    <tr>
-                                        <td class="subtle">@line.LineNumber</td>
-                                        <td>
-                                            <div class="asset-name">@line.Title</div>
-                                            @if (!string.IsNullOrWhiteSpace(line.Instruction)) { <div class="subtle">@line.Instruction</div> }
-                                        </td>
-                                        <td><span class="badge @(line.LineType == JobPlanLineType.Inspection ? "badge-info" : null)">@line.LineType</span></td>
-                                        <td class="hide-sm">
-                                            @if (line.AssetId is not null) { <a class="mono" href="@UiText.AssetUrl(line.AssetId)">@(line.Component ?? line.AssetId)</a> }
-                                            else { <span class="subtle">@(line.Component ?? "—")</span> }
-                                        </td>
-                                        <td class="hide-sm subtle">
-                                            @string.Join(" · ", new[] { line.MeasurementPoint, line.NominalValue, line.AllowedResults.Count > 0 ? string.Join(" / ", line.AllowedResults) : null }.Where(x => !string.IsNullOrWhiteSpace(x)))
-                                        </td>
-                                    </tr>
-                                }
-                            </tbody>
-                        </table>
                     </div>
                 }
 
                 @if (decision == ReviewDecision.Pending)
                 {
-                    @if (_storedStatus.GetValueOrDefault(plan.Id) is { } stored)
+                    var approveTargets = Job.PmModelAssetIds(draft);
+                    @if (approveTargets.Count == 0 && !Job.PmModelsWaitForSelection)
                     {
-                        <p class="subtle">A plan with this ID is already saved (@stored); approving replaces it.</p>
+                        <p class="subtle">No asset is selected for this manual. A PM model belongs to an asset, so this draft can only be rejected.</p>
+                    }
+                    else if (approveTargets.Count > 1)
+                    {
+                        <p class="subtle">Approving creates this PM model, with the same PM jobs and lines, on all @approveTargets.Count linked assets.</p>
+                    }
+
+                    @if (_exists.Contains(draft.Id))
+                    {
+                        <p class="subtle">This PM model already exists on a linked asset; approving replaces its PM jobs and lines.</p>
                     }
                     <div class="row">
-                        <button class="btn btn-primary btn-sm" disabled="@(_busy || !IngestionJobService.CanReviewPlans(Job))" @onclick="@(() => ApprovePlanAsync(plan))">
-                            <Icon Name="check" Size="14" /> Approve &amp; save
+                        <button class="btn btn-primary btn-sm" disabled="@(_busy || approveTargets.Count == 0 || !IngestionJobService.CanReviewPlans(Job))" @onclick="@(() => ApprovePlanAsync(draft))">
+                            <Icon Name="check" Size="14" /> @(approveTargets.Count > 1 ? $"Approve & create on {approveTargets.Count} assets" : "Approve & create PM model")
                         </button>
-                        <button class="btn btn-sm" disabled="@(_busy || !IngestionJobService.CanReviewPlans(Job))" @onclick="@(() => Jobs.RejectJobPlan(Job, plan))">
+                        <button class="btn btn-sm" disabled="@(_busy || !IngestionJobService.CanReviewPlans(Job))" @onclick="@(() => Jobs.RejectJobPlan(Job, draft))">
                             <Icon Name="x" Size="14" /> Reject
                         </button>
+                    </div>
+                }
+            </div>
+                        }
                     </div>
                 }
             </div>
@@ -185,22 +243,37 @@
 
     private DocumentProcessingReport? Doc => Job.Document;
     private readonly HashSet<string> _expandedPlans = [];
-    private readonly Dictionary<string, string?> _storedStatus = new();
+    private bool _showPlans;
+    private readonly HashSet<string> _exists = [];
     private bool _busy;
     private string? _error;
     private Guid _loadedFor;
 
     protected override async Task OnParametersSetAsync()
     {
-        // Warn up front when approving a plan would replace one saved earlier (e.g. the same manual ingested before).
+        // Warn up front when approving would replace a PM model created earlier (e.g. the same manual ingested before).
         if (_loadedFor == Job.Id || Doc?.JobPlans is not { Plans.Count: > 0 } plans) return;
         _loadedFor = Job.Id;
 
         foreach (var plan in plans.Plans)
         {
-            try { _storedStatus[plan.Id] = await Jobs.GetStoredPlanStatusAsync(plan); }
+            try { if (await Jobs.PmModelExistsAsync(Job, plan)) _exists.Add(plan.Id); }
             catch { /* index not created yet: nothing stored */ }
         }
+    }
+
+    // "Weekly" -> "every Weekly" reads oddly; only add "every" when the interval does not say it already.
+    private static string Every(string interval) =>
+        interval.TrimStart().StartsWith("every", StringComparison.OrdinalIgnoreCase) || !char.IsDigit(interval.TrimStart()[0])
+            ? interval.Trim()
+            : $"every {interval.Trim()}";
+
+    // The title already says there is none: drop the "No PM model:" / "None:" prefix from the reason.
+    private static string NoPmReason(string note)
+    {
+        var colon = note.IndexOf(':');
+        var reason = colon > 0 && colon < 15 ? note[(colon + 1)..].Trim() : note.Trim();
+        return reason.Length > 0 ? char.ToUpperInvariant(reason[0]) + reason[1..] : reason;
     }
 
     private void TogglePlan(string id)
@@ -210,7 +283,7 @@
 
     private async Task ApproveProposalAsync() => await RunAsync(() => Jobs.ApproveAssetProposalAsync(Job), "create the assets");
 
-    private async Task ApprovePlanAsync(JobPlan plan) => await RunAsync(() => Jobs.ApproveJobPlanAsync(Job, plan), $"save '{plan.Title}'");
+    private async Task ApprovePlanAsync(JobPlan plan) => await RunAsync(() => Jobs.ApproveJobPlanAsync(Job, plan), $"create PM model '{plan.Title}'");
 
     private async Task RunAsync(Func<Task> action, string what)
     {

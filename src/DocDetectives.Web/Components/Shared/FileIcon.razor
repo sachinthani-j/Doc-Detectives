@@ -1,0 +1,43 @@
+@* File-type tile: red PDF, blue Word, green image, grey for anything else. *@
+
+<span class="file-icon file-@Kind" title="@Label" style="@Style">
+    @switch (Kind)
+    {
+        case "image":
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="3" y="4" width="18" height="16" rx="2" /><circle cx="9" cy="10" r="1.6" /><path d="m21 16-5-5-9 9" />
+            </svg>
+            break;
+        case "word":
+            <span>W</span>
+            break;
+        default:
+            <span>@Label</span>
+            break;
+    }
+</span>
+
+@code {
+    [Parameter, EditorRequired] public string FileName { get; set; } = "";
+
+    /// <summary>Optional inline size, e.g. "width:40px;height:40px;font-size:.7rem".</summary>
+    [Parameter] public string? Style { get; set; }
+
+    private string Extension => Path.GetExtension(FileName).TrimStart('.').ToLowerInvariant();
+
+    private string Kind => Extension switch
+    {
+        "pdf" => "pdf",
+        "doc" or "docx" or "rtf" or "odt" => "word",
+        "png" or "jpg" or "jpeg" or "gif" or "bmp" or "tif" or "tiff" or "webp" or "heic" => "image",
+        _ => "other"
+    };
+
+    private string Label => Kind switch
+    {
+        "pdf" => "PDF",
+        "word" => "Word",
+        "image" => "Image",
+        _ => Extension.Length > 0 ? Extension.ToUpperInvariant() : "DOC"
+    };
+}

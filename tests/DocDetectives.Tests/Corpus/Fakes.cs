@@ -32,7 +32,8 @@ public sealed class CorpusCatalog(IReadOnlyList<Asset> assets) : IAssetCatalogGa
 
     public Task<Asset?> GetAssetByIdAsync(string assetId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     public Task<Asset?> FindAssetBySerialNumberAsync(string serialNumber, CancellationToken cancellationToken = default) => throw new NotSupportedException();
-    public Task<IReadOnlyList<Asset>> GetChildAssetsAsync(string parentAssetId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public Task<IReadOnlyList<Asset>> GetChildAssetsAsync(string parentAssetId, CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlyList<Asset>>(assets.Where(a => a.ParentAssetId == parentAssetId).ToList());
     public Task CreateAssetsAsync(IReadOnlyList<Asset> assets, string manualId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     public Task UpdateCharacteristicsAsync(string assetId, IReadOnlyList<AssetCharacteristic> characteristics, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     public Task UpdateManufacturerDetailsAsync(string assetId, string? manufacturerName, int? manufactureYear, CancellationToken cancellationToken = default) => throw new NotSupportedException();

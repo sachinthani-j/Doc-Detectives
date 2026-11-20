@@ -1,0 +1,99 @@
+@* The PM jobs of one PM model as an accordion: one row per PM job (the first opens by default), whose lines show
+   as a checklist. Inspection lines are blue with what to record as chips; task lines are purple. *@
+
+<div class="pm-jobs">
+    @foreach (var job in Jobs)
+    {
+        var open = IsOpen(job);
+        var inspections = job.Lines.Count(l => l.LineType == JobPlanLineType.Inspection);
+        var tasks = job.Lines.Count - inspections;
+        var filter = _filters.GetValueOrDefault(job.JobCode, LineFilter.All);
+        var lines = job.Lines.Where(l => filter == LineFilter.All
+                                         || (filter == LineFilter.Inspections) == (l.LineType == JobPlanLineType.Inspection)).ToList();
+
+        <div class="pm-job @(open ? "open" : null)">
+            <button type="button" class="pm-job-head" aria-expanded="@(open ? "true" : "false")" @onclick="@(() => Toggle(job))">
+                <span class="pm-job-code">@job.JobCode</span>
+                <span class="grow pm-job-title">
+                    <span class="pm-job-name">@job.Description</span>
+                    <span class="pm-job-meta" title="@job.AssetId">
+                        <Icon Name="box" Size="13" /> <span class="truncate">@(job.Component ?? job.AssetId)</span>
+                    </span>
+                </span>
+                <span class="pm-job-counts hide-sm">
+                    @if (inspections > 0) { <span class="pm-count insp"><Icon Name="clipboard" Size="13" /> @inspections</span> }
+                    @if (tasks > 0) { <span class="pm-count task"><Icon Name="wrench" Size="13" /> @tasks</span> }
+                </span>
+                <span class="badge @(job.JobType == PmJobType.Inspection ? "badge-info" : "badge-accent")">@job.JobType</span>
+                <span class="pm-chevron"><Icon Name="chevron-down" Size="18" /></span>
+            </button>
+
+            @if (open)
+            {
+                <div class="pm-job-body">
+                    <div class="pm-job-toolbar">
+                        <a class="subtle" href="@UiText.AssetUrl(job.AssetId)">Open equipment <Icon Name="arrow-right" Size="13" /></a>
+                        @if (inspections > 0 && tasks > 0)
+                        {
+                            <div class="seg" role="group" aria-label="Filter lines">
+                                <button type="button" class="@(filter == LineFilter.All ? "on" : null)" @onclick="@(() => _filters[job.JobCode] = LineFilter.All)">All @job.Lines.Count</button>
+                                <button type="button" class="@(filter == LineFilter.Inspections ? "on" : null)" @onclick="@(() => _filters[job.JobCode] = LineFilter.Inspections)">Inspections @inspections</button>
+                                <button type="button" class="@(filter == LineFilter.Tasks ? "on" : null)" @onclick="@(() => _filters[job.JobCode] = LineFilter.Tasks)">Tasks @tasks</button>
+                            </div>
+                        }
+                    </div>
+
+                    <ol class="pm-lines">
+                        @foreach (var line in lines)
+                        {
+                            var isInspection = line.LineType == JobPlanLineType.Inspection;
+                            <li class="pm-line @(isInspection ? "insp" : "task")">
+                                <span class="pm-line-icon" title="@line.LineType"><Icon Name="@(isInspection ? "clipboard" : "wrench")" Size="16" /></span>
+                                <span class="pm-line-no">@line.LineNumber</span>
+                                <div class="grow pm-line-text">
+                                    <div class="pm-line-title">@line.Title</div>
+                                    @if (!string.IsNullOrWhiteSpace(line.Instruction)) { <div class="pm-line-instr">@line.Instruction</div> }
+                                </div>
+                                @if (isInspection)
+                                {
+                                    <div class="pm-record">
+                                        @if (!string.IsNullOrWhiteSpace(line.MeasurementPoint)) { <span class="pm-record-point">@line.MeasurementPoint</span> }
+                                        <div class="pm-chips">
+                                            @if (!string.IsNullOrWhiteSpace(line.NominalValue)) { <span class="chip chip-value">@line.NominalValue</span> }
+                                            @foreach (var result in line.AllowedResults)
+                                            {
+                                                <span class="chip @ResultClass(result)">@result</span>
+                                            }
+                                        </div>
+                                    </div>
+                                }
+                            </li>
+                        }
+                    </ol>
+                </div>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<PmJob> Jobs { get; set; } = [];
+
+    private enum LineFilter { All, Inspections, Tasks }
+
+    // Opened/closed by the person; until then only the first PM job is open.
+    private readonly Dictionary<string, bool> _open = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, LineFilter> _filters = new(StringComparer.Ordinal);
+
+    private bool IsOpen(PmJob job) => _open.TryGetValue(job.JobCode, out var open) ? open : Jobs.Count > 0 && Jobs[0] == job;
+
+    private void Toggle(PmJob job) => _open[job.JobCode] = !IsOpen(job);
+
+    // OK-like answers green, NOK-like red, anything else neutral.
+    private static string ResultClass(string result) => result.Trim().ToUpperInvariant() switch
+    {
+        "OK" or "YES" or "JA" or "PASS" or "GOED" => "chip-ok",
+        "NOK" or "NO" or "NEE" or "FAIL" or "NIET OK" or "NOT OK" => "chip-bad",
+        _ => "chip-neutral"
+    };
+}

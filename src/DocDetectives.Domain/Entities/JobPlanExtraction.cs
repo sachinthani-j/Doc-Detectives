@@ -3,12 +3,16 @@ namespace DocDetectives.Domain.Entities;
 /// <summary>What the LLM extracts from a document: zero or more job plans plus document-wide information.</summary>
 /// <param name="DocumentCode">The document's own code, e.g. "JD-PL3-PREV-DRO-001" or "1-365-PK-00030-BL".</param>
 /// <param name="InspectedAsset">For an inspection document: what it states about the inspected equipment; null for a manual.</param>
+/// <param name="PmModelNeeded">For a manual: whether the equipment warrants PM models at all; null for an inspection document.</param>
+/// <param name="PmModelReason">One sentence explaining <paramref name="PmModelNeeded"/>.</param>
 public sealed record JobPlanExtraction(
     string? DocumentCode,
     List<string> Materials,
     List<string> SafetyNotes,
     List<ExtractedJobPlan> Plans,
-    AssetReference? InspectedAsset);
+    AssetReference? InspectedAsset,
+    bool? PmModelNeeded = null,
+    string? PmModelReason = null);
 
 /// <param name="IntervalUnit">One of Hours, Days, Weeks, Months, Years; null when the document gives no frequency.</param>
 public sealed record ExtractedJobPlan(
