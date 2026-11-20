@@ -32,7 +32,8 @@
     --radius: 10px;
     --radius-sm: 6px;
     --font: "Segoe UI Variable Text", "Segoe UI", Inter, system-ui, -apple-system, sans-serif;
-    --mono: "Cascadia Code", "Cascadia Mono", Consolas, ui-monospace, monospace;
+    /* One typeface everywhere: IDs, codes and tags use it too, with fixed-width digits (see .mono). */
+    --mono: var(--font);
     color-scheme: light;
 }
 
@@ -119,6 +120,10 @@ p { margin: 0; }
 a { color: var(--accent-text); text-decoration: none; }
 a:hover { text-decoration: underline; }
 code, .mono { font-family: var(--mono); font-size: .9em; }
+/* Form controls don't inherit the page font by default. */
+button, input, select, textarea, optgroup { font-family: inherit; }
+/* Digits line up in IDs, codes and numbers now that they share the text font. */
+code, pre, kbd, .mono, .tag, .mp-chip, .mp-mono, .org-id, .pm-job-code, .chip-value, .stat .num { font-variant-numeric: tabular-nums; }
 h1:focus { outline: none; }
 
 .muted { color: var(--text-2); }
@@ -184,6 +189,7 @@ h1:focus { outline: none; }
 
 .main { min-width: 0; }
 .page { max-width: 1180px; margin: 0 auto; padding: 2rem 2rem 4rem; }
+.back-button { margin: -.75rem 0 1rem -.5rem; }
 .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 1rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
 .page-head p { margin-top: .35rem; }
 .eyebrow { font-size: .75rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--accent-text); margin-bottom: .35rem; }
@@ -280,6 +286,40 @@ h1:focus { outline: none; }
 .fact dd { margin: 0; font-weight: 500; word-break: break-word; }
 .fact dd.empty-val { color: var(--text-3); font-weight: 400; }
 
+/* Manual summary on the Upload page: identified equipment header, model chips, then document code and manual ID cards */
+.manual-profile { display: flex; flex-direction: column; gap: 1.25rem; }
+.mp-hero { display: flex; gap: 1.1rem; align-items: flex-start; }
+.mp-hero-icon { width: 60px; height: 60px; border-radius: 16px; display: grid; place-items: center; flex-shrink: 0;
+    background: var(--accent-soft); color: var(--accent-text); }
+.mp-eyebrow { font-size: .75rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--accent-text); }
+.mp-title { font-size: 1.75rem; font-weight: 700; line-height: 1.2; letter-spacing: -.015em; margin-top: .15rem; color: var(--text); }
+.mp-title.empty-val { color: var(--text-3); font-weight: 400; font-size: 1.2rem; }
+.mp-sub { display: flex; flex-wrap: wrap; align-items: center; gap: .55rem; margin-top: .4rem; color: var(--text-3); font-size: 1rem; }
+.mp-sub strong { color: var(--text); font-weight: 500; }
+.mp-sub strong.empty-val { color: var(--text-3); font-weight: 400; }
+.mp-dot { color: var(--text-3); opacity: .6; }
+.mp-pill { display: inline-block; padding: .2rem .75rem; border-radius: 999px; font-size: .9rem; font-weight: 500;
+    background: var(--accent-soft); color: var(--accent-text); }
+.mp-label { display: flex; align-items: center; gap: .5rem; font-size: .75rem; font-weight: 700; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--text-3); }
+.mp-count { font-size: .75rem; font-weight: 700; letter-spacing: 0; min-width: 1.4rem; text-align: center; padding: .05rem .45rem;
+    border-radius: 999px; background: var(--surface-2); color: var(--text-2); }
+.mp-section { display: flex; flex-direction: column; gap: .6rem; }
+.mp-chips { display: flex; flex-wrap: wrap; gap: .5rem; }
+.mp-chip { font-family: var(--mono); font-size: .9rem; font-weight: 500; padding: .35rem .8rem; border-radius: 8px;
+    background: var(--surface); border: 1px solid var(--border-strong); color: var(--text); }
+.mp-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .9rem; }
+.mp-card { padding: .9rem 1.1rem; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface);
+    display: flex; flex-direction: column; gap: .35rem; min-width: 0; }
+.mp-card-row { flex-direction: row; align-items: center; gap: 1rem; }
+.mp-card-row .grow { display: flex; flex-direction: column; gap: .35rem; }
+.mp-mono { font-family: var(--mono); font-size: .92rem; font-weight: 500; color: var(--text); word-break: break-all; }
+.mp-mono.empty-val { font-family: inherit; color: var(--text-3); font-weight: 400; }
+.mp-copy { flex-shrink: 0; border-color: var(--accent-soft); background: var(--accent-soft); color: var(--accent-text); }
+.mp-copy:hover { border-color: var(--accent); }
+@media (max-width: 900px) { .mp-cards { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 480px) { .mp-title { font-size: 1.35rem; } .mp-hero-icon { width: 48px; height: 48px; } }
+
 /* ============================================================
    Home
    ============================================================ */
@@ -338,8 +378,9 @@ h1:focus { outline: none; }
 .chat-attach { position: relative; overflow: hidden; cursor: pointer; flex-shrink: 0; }
 .chat-attach input[type=file] { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
 .chat-attach.disabled { opacity: .5; pointer-events: none; }
-.chat-drop { position: absolute; inset: 0; z-index: 5; border: 2px dashed var(--accent); border-radius: inherit; background: color-mix(in srgb, var(--accent-soft) 85%, transparent); display: grid; place-items: center; }
-.chat-drop input[type=file] { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: copy; }
+/* Shown (by dd.chatDrop) only while a file is dragged over the page; the whole page is the drop target. */
+.chat-drop { position: absolute; inset: 0; z-index: 5; border: 2px dashed var(--accent); border-radius: inherit; background: color-mix(in srgb, var(--accent-soft) 85%, transparent); display: none; place-items: center; pointer-events: none; }
+.chat-card.dragging .chat-drop { display: grid; }
 .chat-drop-label { display: flex; align-items: center; gap: .5rem; font-weight: 600; color: var(--accent-text); pointer-events: none; }
 .cite {
     display: inline-grid; place-items: center; min-width: 1.15rem; height: 1.15rem; padding: 0 .25rem;
@@ -681,10 +722,37 @@ a.org-name:hover { text-decoration: underline; }
 
 /* File-type tiles (FileIcon) */
 .file-icon.file-pdf { background: var(--danger-soft); color: var(--danger); }
-.file-icon.file-word { background: var(--info-soft); color: var(--info); font-size: .85rem; font-family: Georgia, "Times New Roman", serif; }
+.file-icon.file-word { background: var(--info-soft); color: var(--info); font-size: .85rem; }
 .file-icon.file-image { background: var(--ok-soft); color: var(--ok); }
 .file-icon.file-other { background: var(--surface-3); color: var(--text-2); }
 
 /* Asset matches: name first, ID as a tag */
 .match-name { font-weight: 600; color: var(--text); }
 .match-name:hover { color: var(--accent-text); }
+
+/* ============================================================
+   Ask the manuals: chat button (bottom right) and side panel
+   ============================================================ */
+.chat-fab { position: fixed; right: 1.5rem; bottom: 1.5rem; z-index: 60; width: 56px; height: 56px; border-radius: 50%;
+    border: none; display: grid; place-items: center; cursor: pointer; color: #fff; background: var(--accent);
+    box-shadow: 0 6px 20px rgba(76, 44, 160, .35), 0 2px 6px rgba(16, 24, 40, .15); transition: transform .15s ease, background .15s ease; }
+.chat-fab:hover { transform: translateY(-2px) scale(1.04); }
+.chat-fab:focus-visible { outline: 3px solid var(--accent-soft); outline-offset: 3px; }
+.chat-fab.open { background: var(--text-2); }
+.chat-drawer { position: fixed; top: 0; right: 0; bottom: 0; z-index: 50; width: min(440px, 100vw); display: flex; flex-direction: column;
+    background: var(--surface); border-left: 1px solid var(--border); box-shadow: -12px 0 32px rgba(16, 24, 40, .14);
+    transform: translateX(105%); visibility: hidden; transition: transform .2s ease, visibility 0s linear .2s; }
+.chat-drawer.open { transform: none; visibility: visible; transition: transform .2s ease; }
+/* Clicking anywhere outside the open panel closes it. */
+.chat-backdrop { position: fixed; inset: 0; z-index: 45; background: rgba(16, 24, 40, .12); animation: chat-fade .2s ease; }
+@keyframes chat-fade { from { opacity: 0; } to { opacity: 1; } }
+.chat-drawer-head { display: flex; align-items: center; gap: .6rem; padding: .8rem .9rem; border-bottom: 1px solid var(--border); }
+.chat-drawer-icon { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; flex-shrink: 0;
+    background: var(--accent-soft); color: var(--accent-text); }
+.chat-drawer-title { font-weight: 600; }
+.chat-drawer .drawer-chat { flex: 1; height: auto; min-height: 0; border: none; border-radius: 0; box-shadow: none; }
+/* Leave room for the chat button over the send button */
+.chat-drawer .chat-input { padding-right: 5.25rem; }
+.link-btn { border: none; background: none; padding: 0; font: inherit; color: var(--accent-text); cursor: pointer; }
+.link-btn:hover { text-decoration: underline; }
+@media (max-width: 480px) { .chat-fab { right: 1rem; bottom: 1rem; } }

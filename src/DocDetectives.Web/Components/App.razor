@@ -30,6 +30,58 @@
         window.dd = {
             scrollToBottom: el => { if (el) el.scrollTop = el.scrollHeight; },
 
+            // Drag and drop for a chat that takes uploads: while the chat is visible, a file dragged anywhere over the
+            // page shows the chat's drop overlay, and dropping it hands the files to the chat's attach input (so the
+            // browser doesn't open the file instead). Hidden chats (e.g. the closed side panel) ignore drags.
+            chatDrop: section => {
+                if (!section || section._ddDrop) return;
+                const input = () => section.querySelector('.chat-attach input[type=file]');
+                const usable = () => {
+                    const i = input();
+                    return i && !i.disabled && section.isConnected && section.getClientRects().length > 0
+                        && getComputedStyle(section).visibility !== 'hidden';
+                };
+                const hasFiles = e => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
+                let depth = 0;
+                const stop = () => { depth = 0; section.classList.remove('dragging'); };
+                const handlers = {
+                    dragenter: e => {
+                        if (!hasFiles(e) || !usable()) return;
+                        depth++;
+                        section.classList.add('dragging');
+                    },
+                    dragover: e => {
+                        if (!section.classList.contains('dragging')) return;
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = 'copy';
+                    },
+                    dragleave: e => {
+                        if (!section.classList.contains('dragging')) return;
+                        if (--depth <= 0 || e.relatedTarget === null) stop();
+                    },
+                    drop: e => {
+                        if (!section.classList.contains('dragging')) return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        stop();
+                        const files = e.dataTransfer && e.dataTransfer.files;
+                        const i = input();
+                        if (!files || files.length === 0 || !i) return;
+                        const dt = new DataTransfer();
+                        for (const f of files) dt.items.add(f);
+                        i.files = dt.files;
+                        i.dispatchEvent(new Event('change', { bubbles: true }));
+                    },
+                    dragend: stop
+                };
+                for (const [type, handler] of Object.entries(handlers)) window.addEventListener(type, handler, true);
+                section._ddDrop = () => {
+                    for (const [type, handler] of Object.entries(handlers)) window.removeEventListener(type, handler, true);
+                    delete section._ddDrop;
+                };
+            },
+            chatDropDispose: section => { if (section && section._ddDrop) section._ddDrop(); },
+
             // "system" | "light" | "dark"
             getTheme: () => {
                 try { return localStorage.getItem("dd-theme") || "system"; } catch (e) { return "system"; }

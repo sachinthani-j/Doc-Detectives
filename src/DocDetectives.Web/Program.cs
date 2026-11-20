@@ -9,6 +9,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddDocDetectives(builder.Configuration);
 
 builder.Services.AddSingleton<IngestionJobService>();
+builder.Services.AddScoped<NavigationHistory>(); // pages visited in this tab, for the back button
 builder.Services.AddHostedService(sp => sp.GetRequiredService<IngestionJobService>());
 
 builder.Services.AddRazorComponents()

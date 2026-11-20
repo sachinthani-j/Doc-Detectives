@@ -1,0 +1,90 @@
+@* "Ask the manuals" as a chat button in the bottom-right corner of every page. It opens the chat in a panel on the
+   right. The panel lives in the layout, so the conversation (and any upload being reviewed) carries on while you move
+   between pages. Hidden on the full Ask page, which shows the same chat already. *@
+@implements IDisposable
+@inject TechnicalManualQaSkill Qa
+@inject NavigationManager Nav
+
+@if (!OnAskPage)
+{
+    <button type="button" class="chat-fab @(_open ? "open" : null)" @onclick="Toggle"
+            title="@(_open ? "Close the chat" : "Ask the manuals")" aria-label="@(_open ? "Close the chat" : "Ask the manuals")"
+            aria-expanded="@(_open ? "true" : "false")" aria-controls="chat-drawer">
+        <Icon Name="@(_open ? "x" : "chat")" Size="24" />
+    </button>
+}
+
+@if (IsOpen)
+{
+    @* Click anywhere outside the panel to close it. *@
+    <div class="chat-backdrop" @onclick="Close" aria-hidden="true"></div>
+}
+
+@* Kept rendered while closed (only hidden), so the conversation is not lost. Esc closes it. *@
+<aside id="chat-drawer" class="chat-drawer @(IsOpen ? "open" : null)" aria-label="Ask the manuals" aria-hidden="@(IsOpen ? "false" : "true")"
+       @onkeydown="OnKeyDown">
+    <div class="chat-drawer-head">
+        <span class="chat-drawer-icon"><Icon Name="chat" Size="18" /></span>
+        <div class="grow" style="min-width:0">
+            <div class="chat-drawer-title">Ask the manuals</div>
+            <div class="subtle truncate">
+                @if (_manual is { } m)
+                {
+                    <span>Answering from <strong>@m.FileName</strong></span>
+                    <button type="button" class="link-btn" @onclick="ClearManual">· all manuals</button>
+                }
+                else
+                {
+                    <span>Searching all uploaded manuals</span>
+                }
+            </div>
+        </div>
+        <a class="btn btn-ghost btn-sm btn-icon" href="ask" title="Open the full page" @onclick="Close"><Icon Name="arrow-right" Size="15" /></a>
+        <button type="button" class="btn btn-ghost btn-sm btn-icon" title="Close" @onclick="Close"><Icon Name="x" Size="15" /></button>
+    </div>
+
+    <ChatPanel Class="drawer-chat"
+               Prepare="PrepareAsync"
+               AllowUploads="true"
+               OnManualReady="SetManual"
+               OnScopeReset="ClearManual"
+               Title="@(_manual is { } t ? t.FileName : "All manuals")"
+               Placeholder="@(_manual is { } p ? $"Ask about {p.FileName}…" : "Ask a question, or attach a manual…")" />
+</aside>
+
+@code {
+    private bool _open;
+
+    // Set when a manual uploaded in the chat has been reviewed: questions are then answered from it only.
+    private (string ManualId, string FileName)? _manual;
+
+    private bool OnAskPage => Nav.ToBaseRelativePath(Nav.Uri).Split('?', '#')[0].Trim('/').Equals("ask", StringComparison.OrdinalIgnoreCase);
+
+    protected override void OnInitialized() => Nav.LocationChanged += OnLocationChanged;
+
+    private bool IsOpen => _open && !OnAskPage;
+
+    private void Toggle() => _open = !_open;
+
+    private void Close() => _open = false;
+
+    private void OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape") Close();
+    }
+
+    private Task<QaContext> PrepareAsync(string question, CancellationToken cancellationToken) =>
+        _manual is { } manual
+            ? Qa.PrepareForManualAsync(manual.ManualId, manual.FileName, question, cancellationToken: cancellationToken)
+            : Qa.PrepareAsync(null, question, cancellationToken: cancellationToken);
+
+    private void SetManual((string ManualId, string FileName) manual) => _manual = manual;
+
+    private void ClearManual() => _manual = null;
+
+    // Re-render on navigation so the button hides on the Ask page and comes back elsewhere.
+    private void OnLocationChanged(object? sender, Microsoft.AspNetCore.Components.Routing.LocationChangedEventArgs e) =>
+        _ = InvokeAsync(StateHasChanged);
+
+    public void Dispose() => Nav.LocationChanged -= OnLocationChanged;
+}

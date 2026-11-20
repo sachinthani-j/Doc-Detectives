@@ -6,7 +6,7 @@
 <PageTitle>@(_doc?.FileName ?? "Document") · Doc Detectives</PageTitle>
 
 <div class="page page-wide">
-    <a class="btn btn-ghost btn-sm" href="documents" style="margin-bottom:1rem"><Icon Name="arrow-left" Size="15" /> Documents</a>
+    <BackButton Fallback="documents" />
 
     @if (_loading)
     {

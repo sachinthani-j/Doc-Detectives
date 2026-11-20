@@ -7,7 +7,7 @@
 <PageTitle>@(_asset?.Name ?? "Asset") · Doc Detectives</PageTitle>
 
 <div class="page">
-    <a class="btn btn-ghost btn-sm" href="assets" style="margin-bottom:1rem"><Icon Name="arrow-left" Size="15" /> Assets</a>
+    <BackButton Fallback="assets" />
 
     @if (_loading)
     {

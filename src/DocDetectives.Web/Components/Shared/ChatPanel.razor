@@ -7,7 +7,7 @@
 @inject IAssetCatalogGateway Catalog
 @inject IJSRuntime JS
 
-<section class="card chat-card @Class" @ondragenter="OnDragEnter">
+<section class="card chat-card @Class" @ref="_section">
     <div class="chat-head">
         <div class="grow truncate"><strong>@Title</strong></div>
         @if (_messages.Count > 0)
@@ -117,12 +117,12 @@
         }
     </div>
 
-    @if (AllowUploads && _dragging)
+    @if (AllowUploads)
     {
-        <div class="chat-drop">
-            <InputFile OnChange="OnFilesSelectedAsync" multiple accept="@Accept"
-                       @ondragleave="@(() => _dragging = false)" @ondrop="@(() => _dragging = false)" />
-            <div class="chat-drop-label"><Icon Name="upload" Size="22" /> Drop manuals to upload</div>
+        @* Shown by dd.chatDrop (in the browser) while a file is dragged over the page; the dropped files are handed
+           to the attach button's file input, so they go through OnFilesSelectedAsync like a picked file. *@
+        <div class="chat-drop" aria-hidden="true">
+            <div class="chat-drop-label"><Icon Name="upload" Size="22" /> Drop manuals here to upload them</div>
         </div>
     }
 
@@ -197,9 +197,9 @@
     private readonly List<UploadConversation> _uploads = [];
     private readonly Dictionary<UploadConversation, Message> _progress = [];
     private ElementReference _scroll;
+    private ElementReference _section;
     private string _question = "";
     private bool _busy;
-    private bool _dragging;
     private CancellationTokenSource? _cts;
 
     public void Clear()
@@ -355,11 +355,17 @@
         await ScrollAsync();
     }
 
-    private void OnDragEnter() => _dragging = AllowUploads && !_busy;
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && AllowUploads)
+        {
+            try { await JS.InvokeVoidAsync("dd.chatDrop", _section); }
+            catch { /* prerendering or disconnected: the attach button still works */ }
+        }
+    }
 
     private async Task OnFilesSelectedAsync(InputFileChangeEventArgs e)
     {
-        _dragging = false;
         if (_busy) return;
         _busy = true;
 
@@ -476,5 +482,10 @@
     {
         _cts?.Cancel();
         DisposeUploads();
+        if (AllowUploads)
+        {
+            // Fire and forget: the circuit may already be gone.
+            _ = JS.InvokeVoidAsync("dd.chatDropDispose", _section).AsTask().ContinueWith(_ => { }, TaskScheduler.Default);
+        }
     }
 }

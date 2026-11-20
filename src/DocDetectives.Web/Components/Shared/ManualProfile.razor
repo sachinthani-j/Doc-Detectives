@@ -1,0 +1,82 @@
+@* What was read from a manual: the identified equipment as a header (name, manufacturer, category), the models it
+   covers as chips, and the document code and manual ID as cards. Empty values show as "Not found". *@
+@inject IJSRuntime JS
+
+<div class="manual-profile">
+    <div class="mp-hero">
+        <span class="mp-hero-icon"><Icon Name="box" Size="26" /></span>
+        <div class="grow" style="min-width:0">
+            <div class="mp-eyebrow">Identified equipment</div>
+            <div class="mp-title @(Blank(EquipmentName) ? "empty-val" : null)">@(Blank(EquipmentName) ? "Not found in the manual" : EquipmentName)</div>
+            <div class="mp-sub">
+                <span>by <strong class="@(Blank(Manual.Manufacturer) ? "empty-val" : null)">@Value(Manual.Manufacturer)</strong></span>
+                @if (!Blank(Manual.EquipmentCategory))
+                {
+                    <span class="mp-dot" aria-hidden="true">•</span>
+                    <span class="mp-pill">@Manual.EquipmentCategory</span>
+                }
+            </div>
+        </div>
+    </div>
+
+    <div class="mp-section">
+        <div class="mp-label">Models covered <span class="mp-count">@Manual.ModelNumbers.Count</span></div>
+        @if (Manual.ModelNumbers.Count == 0)
+        {
+            <div class="subtle">Not found in the manual</div>
+        }
+        else
+        {
+            <div class="mp-chips">
+                @foreach (var model in Manual.ModelNumbers) { <span class="mp-chip">@model</span> }
+            </div>
+        }
+    </div>
+
+    <div class="mp-cards">
+        <div class="mp-card">
+            <div class="mp-label">Document code</div>
+            <div class="mp-mono @(Blank(Structure?.DocumentCode) ? "empty-val" : null)">@Value(Structure?.DocumentCode)</div>
+        </div>
+
+        <div class="mp-card mp-card-row" title="Cut from the file's content, so the same file always gets the same ID">
+            <div class="grow" style="min-width:0">
+                <div class="mp-label">Manual ID</div>
+                <div class="mp-mono">@Manual.ManualId</div>
+            </div>
+            <button type="button" class="btn btn-sm mp-copy" @onclick="CopyIdAsync">
+                <Icon Name="@(_copied ? "check" : "file")" Size="14" /> @(_copied ? "Copied" : "Copy")
+            </button>
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public ExtractedManual Manual { get; set; } = default!;
+
+    private bool _copied;
+
+    private EquipmentAssetStructure? Structure => Manual.AssetStructure;
+
+    private string? EquipmentName => Structure?.EquipmentName;
+
+    private static bool Blank(string? value) => string.IsNullOrWhiteSpace(value);
+
+    private static string Value(string? value) => Blank(value) ? "Not found" : value!;
+
+    private async Task CopyIdAsync()
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("navigator.clipboard.writeText", Manual.ManualId);
+            _copied = true;
+            StateHasChanged();
+            await Task.Delay(1500);
+            _copied = false;
+        }
+        catch
+        {
+            // Clipboard blocked (e.g. not a secure context): the ID can still be selected and copied by hand.
+        }
+    }
+}

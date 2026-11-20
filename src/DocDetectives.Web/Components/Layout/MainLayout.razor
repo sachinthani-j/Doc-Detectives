@@ -1,6 +1,8 @@
 ﻿@inherits LayoutComponentBase
 @implements IDisposable
 @inject IngestionJobService Jobs
+@* Created with the layout so every page visited in this tab is recorded for the back button. *@
+@inject NavigationHistory History
 
 <div class="shell">
     <aside class="sidebar">
@@ -16,7 +18,6 @@
             <NavLink href="" Match="NavLinkMatch.All"><Icon Name="home" /><span class="label">Overview</span></NavLink>
             <NavLink href="assets"><Icon Name="box" /><span class="label">Assets</span></NavLink>
             <NavLink href="documents"><Icon Name="file" /><span class="label">Documents</span></NavLink>
-            <NavLink href="ask"><Icon Name="chat" /><span class="label">Ask the manuals</span></NavLink>
             <NavLink href="upload">
                 <Icon Name="upload" /><span class="label">Upload manuals</span>
                 @if (_activeJobs > 0)
@@ -35,6 +36,9 @@
         @Body
     </main>
 </div>
+
+@* Ask the manuals: chat button in the bottom-right corner, opening a panel on the right. *@
+<ChatDrawer />
 
 <div id="blazor-error-ui" data-nosnippet>
     Something went wrong. <a href="." class="reload">Reload</a>

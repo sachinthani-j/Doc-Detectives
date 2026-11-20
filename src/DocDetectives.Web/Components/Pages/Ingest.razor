@@ -7,6 +7,7 @@
 <PageTitle>Upload manuals · Doc Detectives</PageTitle>
 
 <div class="page">
+    <BackButton />
     <div class="page-head">
         <div>
             <h1>Upload manuals</h1>
@@ -79,7 +80,7 @@
 
     <div class="row" style="justify-content:space-between;margin-bottom:.75rem">
         <h2>Assets</h2>
-        <span class="subtle">Kept until the app restarts</span>
+        @* <span class="subtle">Kept until the app restarts</span> *@
     </div>
 
     @if (_jobs.Count == 0)
@@ -219,14 +220,7 @@
                     var manual = report.ExtractedManual;
                     var s = manual.AssetStructure;
                     <div class="job-body">
-                        <dl class="facts" style="margin:0">
-                            <Fact Label="Manufacturer" Value="@manual.Manufacturer" />
-                            <Fact Label="Equipment" Value="@s?.EquipmentName" />
-                            <Fact Label="Models" Value="@string.Join(", ", manual.ModelNumbers)" />
-                            <Fact Label="Category" Value="@manual.EquipmentCategory" />
-                            <Fact Label="Document code" Value="@s?.DocumentCode" Mono="true" />
-                            <Fact Label="Manual ID" Value="@manual.ManualId" Mono="true" />
-                        </dl>
+                        <ManualProfile Manual="manual" />
 
                         <div class="stack-sm">
                             <div class="stat-row">

@@ -1,0 +1,47 @@
+@* Common back button: uses the browser's own back step (history.back()) when the previous page is part of this app,
+   so scroll position and page state come back as in the browser. Opened directly (no earlier page), it goes to
+   Fallback instead, or is hidden when there is none. *@
+@implements IDisposable
+@inject NavigationHistory History
+@inject NavigationManager Nav
+@inject IJSRuntime JS
+
+@if (History.CanGoBack || Fallback is not null)
+{
+    <button type="button" class="btn btn-ghost btn-sm back-button" @onclick="GoBackAsync" title="@Tooltip">
+        <Icon Name="arrow-left" Size="15" /> @Label
+    </button>
+}
+
+@code {
+    /// <summary>Where to go when there is no earlier page in this tab (e.g. a detail page opened from a shared link).</summary>
+    [Parameter] public string? Fallback { get; set; }
+
+    private string Target => History.PreviousUrl ?? Fallback ?? "";
+
+    private string Label => $"Back to {NavigationHistory.PageName(Target)}";
+
+    private string Tooltip => History.CanGoBack ? "Go back (same as the browser's back button)" : $"Go to {NavigationHistory.PageName(Target)}";
+
+    protected override void OnInitialized() => History.Changed += OnHistoryChanged;
+
+    private async Task GoBackAsync()
+    {
+        if (History.CanGoBack)
+        {
+            try
+            {
+                await JS.InvokeVoidAsync("history.back");
+                return;
+            }
+            catch (JSDisconnectedException) { return; }
+            catch (JSException) { /* fall through to the fallback */ }
+        }
+
+        Nav.NavigateTo(Fallback ?? "");
+    }
+
+    private void OnHistoryChanged() => _ = InvokeAsync(StateHasChanged);
+
+    public void Dispose() => History.Changed -= OnHistoryChanged;
+}
