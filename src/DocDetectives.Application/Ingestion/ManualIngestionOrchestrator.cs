@@ -14,17 +14,27 @@ public sealed record ManualProcessingReport(
     int EmbeddedChunkCount,
     string AssetCreationNote,
     IReadOnlyList<Asset> CreatedAssets,
-    IReadOnlyList<Asset> ProposedAssets);
+    IReadOnlyList<Asset> ProposedAssets,
+    IReadOnlySet<string>? ExistingAssetIds = null);
 
 /// <summary>
-/// A new asset tree waiting for review: nothing is created until a person approves it.
-/// Characteristics are extracted already and applied when the asset is created.
+/// An asset tree waiting for review: nothing is created until a person approves it.
+/// Characteristics are extracted already and applied when the root asset is created.
+/// When the manual matched an existing asset, the tree mixes existing EAM assets (in ExistingAssetIds; never
+/// rewritten) with the missing sub-assets the manual describes (created on approval).
 /// </summary>
 public sealed record AssetProposal(
     string ManualId,
     string SourceFileName,
     IReadOnlyList<Asset> Assets,
-    IReadOnlyList<ExtractedCharacteristic> Characteristics);
+    IReadOnlyList<ExtractedCharacteristic> Characteristics,
+    IReadOnlySet<string>? ExistingAssetIds = null)
+{
+    public bool IsExisting(string assetId) => ExistingAssetIds?.Contains(assetId) == true;
+
+    /// <summary>The assets approval would create.</summary>
+    public IReadOnlyList<Asset> NewAssets => Assets.Where(a => !IsExisting(a.Id)).ToList();
+}
 
 /// <summary>
 /// Result for one uploaded file: exactly one of Manual or Inspection is set, depending on the document type.
@@ -130,14 +140,17 @@ public sealed class ManualIngestionOrchestrator(
 
         var manual = await ProcessManualAsync(rawDocument, autoLinkThreshold, autoCreateAssets, reviewNewAssets, progress, cancellationToken);
 
-        // The manual's asset: the one just created or proposed, otherwise the best auto-linked existing asset.
+        // The manual's asset: the best auto-linked existing asset, otherwise the one just created or proposed.
+        // (When the root matched, created/proposed assets are only the missing sub-assets, so the match comes first.)
         // A proposed asset keeps its ID through review, so drafted job plans can already point to it.
-        var manualAssetId = manual.CreatedAssets.FirstOrDefault()?.Id
-                            ?? manual.ProposedAssets.FirstOrDefault()?.Id
-                            ?? manual.Mappings
+        var manualAssetId = manual.Mappings
                                 .Where(m => m.Status == MappingStatus.AutoLinked)
                                 .OrderByDescending(m => m.ConfidenceScore)
-                                .FirstOrDefault()?.AssetId;
+                                .FirstOrDefault()?.AssetId
+                            ?? manual.CreatedAssets.FirstOrDefault()?.Id
+                            ?? manual.ProposedAssets.FirstOrDefault()?.Id;
+        var rootExists = manual.ExistingAssetIds?.Contains(manualAssetId ?? string.Empty) == true
+                         || manual.Mappings.Any(m => m.Status == MappingStatus.AutoLinked);
 
         // The enriched manual carries the extracted manufacturer and models onto the plans.
         var manualPlans = generateJobPlans
@@ -145,8 +158,8 @@ public sealed class ManualIngestionOrchestrator(
                 manual.ExtractedManual, DocumentType.Manual, manualAssetId, autoLinkThreshold, cancellationToken)
             : null;
 
-        // A proposed asset does not exist yet: extract its characteristics now and apply them when it is approved.
-        if (manual.ProposedAssets.Count > 0)
+        // A proposed new root asset does not exist yet: extract its characteristics now and apply them on approval.
+        if (manual.ProposedAssets.Count > 0 && !rootExists)
         {
             var proposedCharacteristics = extractCharacteristics
                 ? await characteristicService.ExtractAsync(manual.ProposedAssets[0], manual.ExtractedManual, cancellationToken)
@@ -168,8 +181,19 @@ public sealed class ManualIngestionOrchestrator(
             ? await characteristicService.FillFromManualAsync(manualAssetId, manual.ExtractedManual, cancellationToken)
             : null;
 
+        // The root matched an existing asset but the manual has sub-assets the EAM lacks: those wait for review,
+        // shown together with the existing ones they hang under ("link existing A and B, create new C").
+        var partialProposal = manual.ProposedAssets.Count > 0
+            ? new AssetProposal(
+                manual.ExtractedManual.ManualId,
+                manual.ExtractedManual.FileName,
+                manual.ProposedAssets,
+                [],
+                manual.ExistingAssetIds)
+            : null;
+
         // A matched existing asset gets the manufacturer name and build year from the manual, if it has none yet.
-        var manufacturerNote = manualAssetId is not null && manual.CreatedAssets.Count == 0
+        var manufacturerNote = manualAssetId is not null && rootExists
             ? await FillManufacturerDetailsAsync(
                 manualAssetId,
                 manual.ExtractedManual.Manufacturer,
@@ -180,7 +204,7 @@ public sealed class ManualIngestionOrchestrator(
         progress?.Report(IngestionStage.Completed);
         return new DocumentProcessingReport(
             rawDocument.ManualId, rawDocument.FileName, classification, manual, null, manualPlans, characteristics,
-            null, manufacturerNote);
+            partialProposal, manufacturerNote);
     }
 
     // Only empty fields are filled; a value already on the asset is never overwritten.
@@ -250,11 +274,54 @@ public sealed class ManualIngestionOrchestrator(
         var newAssets = AssetTreeBuilder.Build(structure, enrichedManual.Manufacturer, out var missingInfo);
         IReadOnlyList<Asset> createdAssets = [];
         IReadOnlyList<Asset> proposedAssets = [];
+        IReadOnlySet<string>? existingAssetIds = null;
         string assetCreationNote;
 
         if (mappings.Any(m => m.Status == MappingStatus.AutoLinked))
         {
-            assetCreationNote = "Not needed: linked to an existing asset.";
+            // Map the manual's structure onto the matched asset: existing sub-assets are linked as they are,
+            // sub-assets the EAM lacks are proposed (or created) under the right existing parent.
+            var bestMatch = mappings
+                .Where(m => m.Status == MappingStatus.AutoLinked)
+                .OrderByDescending(m => m.ConfidenceScore)
+                .First();
+            var existingRoot = newAssets is { Count: > 1 } && autoCreateAssets
+                ? await assetCatalog.GetAssetByIdAsync(bestMatch.AssetId, cancellationToken)
+                : null;
+
+            if (existingRoot is null)
+            {
+                assetCreationNote = "Not needed: linked to an existing asset.";
+            }
+            else
+            {
+                var tree = await AssetTreeReconciler.ReconcileAsync(newAssets!, existingRoot, assetCatalog, cancellationToken);
+                var linkedSubs = tree.ExistingAssetIds.Count - 1;
+                var newOnes = tree.NewAssets.ToList();
+
+                if (newOnes.Count == 0)
+                {
+                    assetCreationNote =
+                        $"Not needed: linked to existing '{existingRoot.Id}'; all {linkedSubs} sub-asset(s) from the manual already exist.";
+                }
+                else if (reviewNewAssets)
+                {
+                    proposedAssets = tree.Assets;
+                    existingAssetIds = tree.ExistingAssetIds;
+                    assetCreationNote =
+                        $"Linked to existing '{existingRoot.Id}' and {linkedSubs} existing sub-asset(s); " +
+                        $"{newOnes.Count} new sub-asset(s) from the manual proposed, waiting for review.";
+                }
+                else
+                {
+                    await assetCatalog.CreateAssetsAsync(newOnes, enrichedManual.ManualId, cancellationToken);
+                    createdAssets = newOnes;
+                    existingAssetIds = tree.ExistingAssetIds;
+                    assetCreationNote =
+                        $"Linked to existing '{existingRoot.Id}' and {linkedSubs} existing sub-asset(s); " +
+                        $"created {newOnes.Count} new sub-asset(s) from the manual.";
+                }
+            }
         }
         else if (mappings.Count > 0)
         {
@@ -316,6 +383,7 @@ public sealed class ManualIngestionOrchestrator(
             .Select(m => m.AssetId)
             .Concat(createdAssets.Select(a => a.Id))
             .Concat(proposedAssets.Select(a => a.Id))
+            .Concat(existingAssetIds ?? (IEnumerable<string>)[])
             .Distinct()
             .ToList();
 
@@ -346,7 +414,7 @@ public sealed class ManualIngestionOrchestrator(
         progress?.Report(IngestionStage.StoringInIndex);
         await knowledgeIndex.UpsertChunksAsync(vectorizedChunks, cancellationToken);
 
-        return new ManualProcessingReport(enrichedManual, mappings, vectorizedChunks.Count, assetCreationNote, createdAssets, proposedAssets);
+        return new ManualProcessingReport(enrichedManual, mappings, vectorizedChunks.Count, assetCreationNote, createdAssets, proposedAssets, existingAssetIds);
     }
 
     // The embedding model accepts at most 8192 tokens per input. Technical text (part numbers, tables)

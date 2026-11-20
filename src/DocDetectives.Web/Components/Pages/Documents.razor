@@ -10,9 +10,9 @@
         <div>
             <div class="eyebrow">Library</div>
             <h1>Documents</h1>
-            <p class="muted">Every manual that has been ingested. Open one to preview it and chat about it.</p>
+            <p class="muted">Every manual that has been uploaded. Open one to preview it and chat about it.</p>
         </div>
-        <a class="btn" href="ingest"><Icon Name="upload" Size="16" /> Ingest documents</a>
+        <a class="btn" href="upload"><Icon Name="upload" Size="16" /> Upload documents</a>
     </div>
 
     <div class="row" style="margin-bottom:1.25rem">
@@ -27,13 +27,14 @@
         <div class="alert alert-danger" style="margin-bottom:1rem"><Icon Name="alert" /> <div>@_error</div></div>
     }
 
-    @if (_notIngested.Count > 0)
+    @* Hidden while the Upload page hides the manuals-folder list (nothing to click there to process these files). *@
+    @if (ShowNotProcessedBanner && _notIngested.Count > 0)
     {
         <div class="alert alert-info" style="margin-bottom:1rem">
             <Icon Name="file" />
             <div class="grow">
-                @_notIngested.Count file@(_notIngested.Count == 1 ? " is" : "s are") in the manuals folder but not ingested yet.
-                <a href="ingest">Ingest them</a>
+                @_notIngested.Count file@(_notIngested.Count == 1 ? " is" : "s are") in the manuals folder but not uploaded for processing yet.
+                <a href="upload">Process them</a>
             </div>
         </div>
     }
@@ -50,8 +51,8 @@
             <div class="empty">
                 <div class="icon-wrap"><Icon Name="file" /></div>
                 <h3>No documents yet</h3>
-                <p>Ingest a manual and it will show up here.</p>
-                <p style="margin-top:1rem"><a class="btn btn-sm btn-primary" href="ingest">Ingest documents</a></p>
+                <p>Upload a manual and it will show up here.</p>
+                <p style="margin-top:1rem"><a class="btn btn-sm btn-primary" href="upload">Upload documents</a></p>
             </div>
         }
         else
@@ -124,6 +125,7 @@
     private IReadOnlyList<ManualReference>? _documents;
     private HashSet<string> _filesOnDisk = new(StringComparer.OrdinalIgnoreCase);
     private List<string> _notIngested = [];
+    private static readonly bool ShowNotProcessedBanner = false;
     private string _filter = "";
     private string? _error;
 

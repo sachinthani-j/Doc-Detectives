@@ -1,21 +1,21 @@
+@page "/upload"
 @page "/ingest"
 @implements IDisposable
 @inject IngestionJobService Jobs
 
-<PageTitle>Ingest manuals · Doc Detectives</PageTitle>
+<PageTitle>Upload manuals · Doc Detectives</PageTitle>
 
 <div class="page">
     <div class="page-head">
         <div>
-            <div class="eyebrow">Pipeline</div>
-            <h1>Ingest manuals</h1>
+            <h1>Upload manuals</h1>
             <p class="muted">Each manual is read, its specs and parts are extracted, it's matched to assets, and its sections are indexed for Q&amp;A.</p>
         </div>
     </div>
 
-    <div class="grid-2" style="margin-bottom:1.5rem;align-items:start">
+    <div class="@(ShowManualsFolder ? "grid-2" : null)" style="margin-bottom:1.5rem;align-items:start">
         <div class="stack">
-            <div class="dropzone @(_dragging ? "dragging" : null)">
+            <div class="dropzone @(_dragging ? "dragging" : null) @(ShowManualsFolder ? null : "wide")">
                 <InputFile OnChange="OnFilesSelectedAsync" multiple accept=".pdf,.docx,.doc,.png,.jpg,.jpeg,.tiff"
                            @ondragenter="@(() => _dragging = true)" @ondragleave="@(() => _dragging = false)" @ondrop="@(() => _dragging = false)" />
                 <div class="icon-tile"><Icon Name="upload" Size="22" /></div>
@@ -33,6 +33,9 @@
             }
         </div>
 
+        @* Hidden for now: set ShowManualsFolder to true to list the files already in the manuals folder. *@
+        @if (ShowManualsFolder)
+        {
         <div class="card">
             <div class="card-head">
                 <div>
@@ -41,7 +44,7 @@
                 </div>
                 @if (_files.Count > 1)
                 {
-                    <button class="btn btn-sm" @onclick="IngestAll">Ingest all</button>
+                    <button class="btn btn-sm" @onclick="IngestAll">Process all</button>
                 }
             </div>
             @if (_files.Count == 0)
@@ -63,17 +66,18 @@
                                 <div class="subtle">@UiText.Size(f.Length)</div>
                             </div>
                             <button class="btn btn-sm" disabled="@busy" @onclick="@(() => Jobs.Enqueue(f.FullName))">
-                                @(busy ? "Queued" : "Ingest")
+                                @(busy ? "Queued" : "Process")
                             </button>
                         </div>
                     }
                 </div>
             }
         </div>
+        }
     </div>
 
     <div class="row" style="justify-content:space-between;margin-bottom:.75rem">
-        <h2>Jobs</h2>
+        <h2>Assets</h2>
         <span class="subtle">Kept until the app restarts</span>
     </div>
 
@@ -83,7 +87,7 @@
             <div class="empty">
                 <div class="icon-wrap"><Icon Name="file" /></div>
                 <h3>Nothing processed yet</h3>
-                <p>Upload a manual or pick one from the folder to start.</p>
+                <p>Upload a manual to start.</p>
             </div>
         </div>
     }
@@ -349,8 +353,9 @@
                         @if (report.CreatedAssets.Count > 0)
                         {
                             <div class="stack-sm">
-                                <h3>New asset hierarchy</h3>
-                                <AssetTree Items="report.CreatedAssets" />
+                                <h3>Created assets</h3>
+                                <AssetStructureChart Items="report.CreatedAssets" />
+                                <details class="parts-details"><summary class="subtle">Spare parts</summary><AssetTree Items="report.CreatedAssets" /></details>
                             </div>
                         }
 
@@ -380,6 +385,9 @@
 
 @code {
     private const int MaxFileMb = 100;
+
+    /// <summary>The "Manuals folder" card (files already on disk, with Process buttons). Hidden for now.</summary>
+    private static readonly bool ShowManualsFolder = false;
 
     private List<IngestionJob> _jobs = [];
     private IReadOnlyList<FileInfo> _files = [];

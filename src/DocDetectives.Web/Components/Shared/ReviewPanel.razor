@@ -29,20 +29,38 @@
 @if (Doc.AssetProposal is { } proposal)
 {
     var decision = Job.AssetProposalDecision;
+    var newCount = proposal.NewAssets.Count;
+    var mapsOntoExisting = proposal.IsExisting(proposal.Assets[0].Id);
     <div class="review-card @(decision == ReviewDecision.Pending ? "pending" : null)">
         <div class="review-head">
             <div class="grow">
-                <h3>New asset proposal</h3>
+                <h3>@(mapsOntoExisting ? "Asset structure from the manual" : "New asset proposal")</h3>
                 <p class="subtle">
-                    Nothing is created until you approve. @proposal.Assets.Count asset(s),
-                    @proposal.Assets.Sum(a => a.SpareParts?.Count ?? 0) spare part(s),
-                    @proposal.Characteristics.Count characteristic(s).
+                    @if (mapsOntoExisting)
+                    {
+                        <span>The manual matched existing asset <a class="mono" href="@UiText.AssetUrl(proposal.Assets[0].Id)">@proposal.Assets[0].Id</a>.
+                        Existing assets are only linked, never changed; approving creates the @newCount new sub-asset@(newCount == 1 ? "" : "s").</span>
+                    }
+                    else
+                    {
+                        <span>Nothing is created until you approve. @newCount new asset@(newCount == 1 ? "" : "s"),
+                        @proposal.Assets.Sum(a => a.SpareParts?.Count ?? 0) spare part(s),
+                        @proposal.Characteristics.Count characteristic(s).</span>
+                    }
                 </p>
             </div>
             <DecisionBadge Decision="decision" />
         </div>
 
-        <AssetTree Items="decision == ReviewDecision.Approved && Job.ApprovedProposalAssets.Count > 0 ? Job.ApprovedProposalAssets : proposal.Assets" />
+        <AssetStructureChart Items="proposal.Assets" ExistingIds="proposal.ExistingAssetIds" ShowSummary="true" />
+
+        @if (proposal.NewAssets.Any(a => a.SpareParts is { Count: > 0 }))
+        {
+            <details class="parts-details">
+                <summary class="subtle">Spare parts on the new assets (@proposal.NewAssets.Sum(a => a.SpareParts?.Count ?? 0))</summary>
+                <AssetTree Items="proposal.NewAssets" />
+            </details>
+        }
 
         @if (proposal.Characteristics.Count > 0)
         {
@@ -58,7 +76,8 @@
         {
             <div class="row">
                 <button class="btn btn-primary btn-sm" disabled="@_busy" @onclick="ApproveProposalAsync">
-                    @if (_busy) { <span class="spinner"></span> } else { <Icon Name="check" Size="14" /> } Approve &amp; create
+                    @if (_busy) { <span class="spinner"></span> } else { <Icon Name="check" Size="14" /> }
+                    @(mapsOntoExisting ? $"Approve & create {newCount} new" : "Approve & create")
                 </button>
                 <button class="btn btn-sm" disabled="@_busy" @onclick="@(() => Jobs.RejectAssetProposal(Job))"><Icon Name="x" Size="14" /> Reject</button>
             </div>

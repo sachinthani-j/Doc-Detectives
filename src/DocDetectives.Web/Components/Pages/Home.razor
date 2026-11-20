@@ -8,7 +8,7 @@
 <div class="page">
     <section class="hero">
         <h1>Find the right manual for every asset</h1>
-        <p>Search your equipment, ask technical questions answered from OEM manuals, and ingest new manuals that are matched to assets automatically.</p>
+        <p>Search your equipment, ask technical questions answered from OEM manuals, and upload new manuals that are matched to assets automatically.</p>
 
         <form class="search" @onsubmit="Search">
             <span class="search-icon"><Icon Name="search" /></span>
@@ -25,26 +25,26 @@
         <a class="card action-card" href="ask">
             <span class="icon-tile"><Icon Name="chat" /></span>
             <h3>Ask the manuals</h3>
-            <p>Get answers with citations, scoped to one asset or across every ingested manual.</p>
+            <p>Get answers with citations, scoped to one asset or across every uploaded manual.</p>
         </a>
-        <a class="card action-card" href="ingest">
+        <a class="card action-card" href="upload">
             <span class="icon-tile"><Icon Name="upload" /></span>
-            <h3>Ingest manuals</h3>
+            <h3>Upload manuals</h3>
             <p>Upload PDFs. Specs, spare parts and fault codes are extracted and matched to assets.</p>
         </a>
     </div>
 
     <div class="card">
         <div class="card-head">
-            <h2>Recent ingestion</h2>
-            <a class="btn btn-sm" href="ingest">Open ingest <Icon Name="arrow-right" Size="14" /></a>
+            <h2>Recent uploads</h2>
+            <a class="btn btn-sm" href="upload">Open uploads <Icon Name="arrow-right" Size="14" /></a>
         </div>
         @if (_jobs.Count == 0)
         {
             <div class="empty">
                 <div class="icon-wrap"><Icon Name="clock" /></div>
                 <h3>No manuals processed yet</h3>
-                <p>Manuals you ingest from this app will show up here.</p>
+                <p>Manuals you upload in this app will show up here.</p>
             </div>
         }
         else
@@ -56,7 +56,7 @@
                         @foreach (var job in _jobs)
                         {
                             var status = UiText.Status(job.Status);
-                            <tr class="clickable" @onclick="@(() => Nav.NavigateTo("ingest"))">
+                            <tr class="clickable" @onclick="@(() => Nav.NavigateTo("upload"))">
                                 <td><span class="asset-name">@job.FileName</span></td>
                                 <td>
                                     <span class="@status.Css">

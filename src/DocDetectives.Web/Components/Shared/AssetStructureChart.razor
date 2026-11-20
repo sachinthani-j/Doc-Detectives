@@ -1,0 +1,89 @@
+@* Top-down asset structure chart: existing EAM assets (green) and new assets from the manual (orange).
+   Items is a flat list linked by ParentAssetId; ExistingIds marks the nodes that already exist in the EAM. *@
+
+@if (ShowSummary)
+{
+    <div class="map-flow">
+        <span class="map-step"><Icon Name="file" Size="14" /> Asset manual</span>
+        <span class="map-arrow">→</span>
+        <span class="map-step">Map to EAM</span>
+        <span class="map-arrow">→</span>
+        <span class="map-step existing"><Icon Name="link" Size="14" /> Link @ExistingCount existing</span>
+        <span class="map-step new"><Icon Name="plus" Size="14" /> Create @NewCount new</span>
+    </div>
+}
+
+<div class="org">
+    <ul>
+        @foreach (var root in Roots)
+        {
+            @Node(root)
+        }
+    </ul>
+</div>
+
+@if (ShowLegend)
+{
+    <div class="org-legend">
+        <span><i class="swatch existing"></i> Existing in EAM</span>
+        <span><i class="swatch new"></i> New from manual</span>
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<Asset> Items { get; set; } = [];
+
+    /// <summary>Ids that already exist in the EAM; every other node is drawn as new. Null means all are new.</summary>
+    [Parameter] public IReadOnlySet<string>? ExistingIds { get; set; }
+
+    /// <summary>Draw every node as existing (e.g. an asset's current structure on its own page).</summary>
+    [Parameter] public bool AllExisting { get; set; }
+
+    [Parameter] public bool ShowLegend { get; set; } = true;
+    [Parameter] public bool ShowSummary { get; set; }
+
+    private bool IsExisting(Asset a) => AllExisting || ExistingIds?.Contains(a.Id) == true;
+    private int ExistingCount => Items.Count(IsExisting);
+    private int NewCount => Items.Count - ExistingCount;
+
+    private IEnumerable<Asset> Roots =>
+        Items.Where(a => a.ParentAssetId is null || Items.All(p => p.Id != a.ParentAssetId));
+
+    private IEnumerable<Asset> ChildrenOf(Asset parent) => Items.Where(a => a.ParentAssetId == parent.Id);
+
+    // Sub-asset names follow "Component - Equipment"; the component part is the readable label.
+    private static string Label(Asset a) =>
+        a.Name.Split(" - ")[0] is { Length: > 0 } part ? part : a.Name;
+
+    private RenderFragment Node(Asset asset) => __builder =>
+    {
+        var existing = IsExisting(asset);
+        var children = ChildrenOf(asset).ToList();
+        <li>
+            <div class="org-node @(existing ? "existing" : "new")" title="@asset.Name">
+                @if (existing)
+                {
+                    <a class="org-name" href="@UiText.AssetUrl(asset.Id)">@Label(asset)</a>
+                }
+                else
+                {
+                    <span class="org-name">@Label(asset)</span>
+                }
+                <span class="org-id">@asset.Id</span>
+                <span class="org-meta">
+                    @(existing ? "Existing in EAM" : "New from manual")
+                    @if (asset.SpareParts is { Count: > 0 } parts) { <span> · @parts.Count part@(parts.Count == 1 ? "" : "s")</span> }
+                </span>
+            </div>
+            @if (children.Count > 0)
+            {
+                <ul>
+                    @foreach (var child in children)
+                    {
+                        @Node(child)
+                    }
+                </ul>
+            }
+        </li>
+    };
+}

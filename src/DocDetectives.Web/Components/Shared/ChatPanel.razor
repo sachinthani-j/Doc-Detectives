@@ -98,7 +98,7 @@
     [Parameter, EditorRequired] public Func<string, CancellationToken, Task<QaContext>> Prepare { get; set; } = default!;
 
     [Parameter] public string Title { get; set; } = "Conversation";
-    [Parameter] public string EmptyTitle { get; set; } = "Ask anything from the ingested manuals";
+    [Parameter] public string EmptyTitle { get; set; } = "Ask anything from the uploaded manuals";
     [Parameter] public string Placeholder { get; set; } = "Ask a question…";
     [Parameter] public string Class { get; set; } = "";
 

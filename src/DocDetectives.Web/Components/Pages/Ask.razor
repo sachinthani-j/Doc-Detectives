@@ -19,7 +19,7 @@
         <ChatPanel @key="@(_asset?.Id ?? "*")"
                    Prepare="PrepareAsync"
                    Title="@(_asset is null ? "All manuals" : _asset.Name)"
-                   EmptyTitle="@(_asset is null ? "Ask anything from the ingested manuals" : $"Ask about {_asset.Name}")"
+                   EmptyTitle="@(_asset is null ? "Ask anything from the uploaded manuals" : $"Ask about {_asset.Name}")"
                    Placeholder="@(_asset is null ? "Ask a question about any manual…" : $"Ask about {_asset.Id}…")" />
 
         <aside class="card card-pad scope-card stack">
@@ -34,7 +34,7 @@
                     <span class="icon-tile" style="color:var(--accent-text)"><Icon Name="globe" /></span>
                     <div class="grow">
                         <div style="font-weight:600">All manuals</div>
-                        <div class="subtle">Every ingested manual is searched.</div>
+                        <div class="subtle">Every uploaded manual is searched.</div>
                     </div>
                 }
                 else
