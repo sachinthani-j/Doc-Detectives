@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DocDetectives.Application\DocDetectives.Application.csproj" />
+    <ProjectReference Include="..\..\src\DocDetectives.Domain\DocDetectives.Domain.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Synthetic corpus: assets (Ultimo-style export) and golden set with repo identifiers. -->
+    <Content Include="..\..\dataset\sample_synthetic_assets.csv" Link="TestData\sample_synthetic_assets.csv" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\dataset\T1_corpus_golden_set_synthetic.csv" Link="TestData\T1_corpus_golden_set_synthetic.csv" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>
