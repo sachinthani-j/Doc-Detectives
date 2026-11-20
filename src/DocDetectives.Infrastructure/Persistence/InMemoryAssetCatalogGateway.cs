@@ -122,7 +122,28 @@ public sealed class InMemoryAssetCatalogGateway : IAssetCatalogGateway
         CancellationToken cancellationToken = default)
     {
         var list = _links.GetOrAdd(assetId, _ => []);
-        list.Add((manualId, confidenceScore, status));
+        lock (list)
+        {
+            list.RemoveAll(l => l.ManualId == manualId);
+            list.Add((manualId, confidenceScore, status));
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public Task UnlinkManualFromAssetAsync(
+        string assetId,
+        string manualId,
+        CancellationToken cancellationToken = default)
+    {
+        if (_links.TryGetValue(assetId, out var list))
+        {
+            lock (list)
+            {
+                list.RemoveAll(l => l.ManualId == manualId);
+            }
+        }
+
         return Task.CompletedTask;
     }
 }

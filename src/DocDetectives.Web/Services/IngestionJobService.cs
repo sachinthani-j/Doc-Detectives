@@ -36,8 +36,27 @@ public sealed class IngestionJob
 
     public string? Error { get; internal set; }
 
-    /// <summary>Asset ids of NeedsReview matches a user approved in the UI.</summary>
-    public ConcurrentDictionary<string, bool> ApprovedAssetIds { get; } = new(StringComparer.Ordinal);
+    /// <summary>
+    /// Matched existing assets this manual is currently linked to (stored in the asset's linked manual ids).
+    /// Empty after ingestion; filled only when a user saves the selection in the UI.
+    /// </summary>
+    public ConcurrentDictionary<string, bool> LinkedAssetIds { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>True once the user saved an asset selection for this job.</summary>
+    public bool LinksSaved { get; internal set; }
+
+    /// <summary>
+    /// Checkbox state before the user changes anything: what is linked once saved, otherwise the high-confidence matches.
+    /// </summary>
+    public HashSet<string> DefaultSelection() =>
+        LinksSaved
+            ? LinkedAssetIds.Keys.ToHashSet(StringComparer.Ordinal)
+            : SelectableMatches.Where(m => m.Status == MappingStatus.AutoLinked).Select(m => m.AssetId)
+                .ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>Matches of existing assets a user can select or deselect (new/proposed assets are not listed).</summary>
+    public IReadOnlyList<AssetMappingResult> SelectableMatches =>
+        Report?.Mappings.Where(m => m.Status is MappingStatus.AutoLinked or MappingStatus.NeedsReview).ToList() ?? [];
 
     /// <summary>Decision on <see cref="DocumentProcessingReport.AssetProposal"/> (new assets wait for approval).</summary>
     public ReviewDecision AssetProposalDecision { get; internal set; } = ReviewDecision.Pending;
@@ -137,21 +156,48 @@ public sealed class IngestionJobService(
         _jobs.Values.Any(j => j.Status is IngestionJobStatus.Queued or IngestionJobStatus.Running
                               && string.Equals(j.FilePath, filePath, StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>Links a manual to an asset the matching skill was unsure about.</summary>
-    public async Task ApproveMatchAsync(IngestionJob job, AssetMappingResult mapping, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Makes the manual linked to exactly the selected matched assets: selected ones are added to the asset's
+    /// linked manual ids, deselected ones that were linked are removed.
+    /// </summary>
+    public async Task SaveMatchSelectionAsync(
+        IngestionJob job,
+        IReadOnlySet<string> selectedAssetIds,
+        CancellationToken cancellationToken = default)
     {
         await using var scope = services.CreateAsyncScope();
         var catalog = scope.ServiceProvider.GetRequiredService<IAssetCatalogGateway>();
 
-        await catalog.LinkManualToAssetAsync(
-            mapping.AssetId,
-            mapping.ManualId,
-            mapping.ConfidenceScore,
-            MappingStatus.AutoLinked,
-            cancellationToken);
+        try
+        {
+            foreach (var mapping in job.SelectableMatches)
+            {
+                var selected = selectedAssetIds.Contains(mapping.AssetId);
+                var linked = job.LinkedAssetIds.ContainsKey(mapping.AssetId);
 
-        job.ApprovedAssetIds[mapping.AssetId] = true;
-        NotifyChanged();
+                if (selected && !linked)
+                {
+                    await catalog.LinkManualToAssetAsync(
+                        mapping.AssetId,
+                        mapping.ManualId,
+                        mapping.ConfidenceScore,
+                        MappingStatus.AutoLinked,
+                        cancellationToken);
+                    job.LinkedAssetIds[mapping.AssetId] = true;
+                }
+                else if (!selected && linked)
+                {
+                    await catalog.UnlinkManualFromAssetAsync(mapping.AssetId, mapping.ManualId, cancellationToken);
+                    job.LinkedAssetIds.TryRemove(mapping.AssetId, out _);
+                }
+            }
+        }
+        finally
+        {
+            // Also on failure: the links saved before the error are shown as linked.
+            job.LinksSaved = true;
+            NotifyChanged();
+        }
     }
 
     /// <summary>Creates the proposed asset tree (and its new characteristics) after a person approved it.</summary>
@@ -272,7 +318,9 @@ public sealed class IngestionJobService(
                 cfg.ReviewNewAssets,
                 cfg.CreateInspectionJobs,
                 progress,
-                stoppingToken);
+                stoppingToken,
+                // Matched assets are not linked during ingestion: the user selects them in the UI.
+                linkMatchedAssets: false);
 
             job.Status = IngestionJobStatus.Succeeded;
         }

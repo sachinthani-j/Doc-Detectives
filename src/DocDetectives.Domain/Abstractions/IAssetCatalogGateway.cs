@@ -52,4 +52,10 @@ public interface IAssetCatalogGateway
         double confidenceScore,
         MappingStatus status,
         CancellationToken cancellationToken = default);
+
+    /// <summary>Removes the manual from the asset's linked manuals; does nothing when it was not linked.</summary>
+    Task UnlinkManualFromAssetAsync(
+        string assetId,
+        string manualId,
+        CancellationToken cancellationToken = default);
 }

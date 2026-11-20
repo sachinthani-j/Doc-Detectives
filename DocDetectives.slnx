@@ -5,4 +5,7 @@
     <Project Path="src/DocDetectives.Infrastructure/DocDetectives.Infrastructure.csproj" />
     <Project Path="src/DocDetectives.Web/DocDetectives.Web.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DocDetectives.Tests/DocDetectives.Tests.csproj" />
+  </Folder>
 </Solution>

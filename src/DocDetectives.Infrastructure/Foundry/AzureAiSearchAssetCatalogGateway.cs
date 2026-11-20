@@ -137,9 +137,9 @@ public sealed class AzureAiSearchAssetCatalogGateway : IAssetCatalogGateway
                 ["category"] = asset.Category,
                 [_cfg.ParentAssetIdField] = asset.ParentAssetId,
                 [_cfg.SparePartsField] = (asset.SpareParts ?? []).ToArray(),
-            [_cfg.ManufactureYearField] = asset.ManufactureYear,
-            [_cfg.ManufacturerNameField] = asset.ManufacturerName,
-            [_cfg.CharacteristicsField] = ToCharacteristicDocuments(asset.Characteristics ?? []),
+                [_cfg.ManufactureYearField] = asset.ManufactureYear,
+                [_cfg.ManufacturerNameField] = asset.ManufacturerName,
+                [_cfg.CharacteristicsField] = ToCharacteristicDocuments(asset.Characteristics ?? []),
                 [_cfg.LinkedManualIdsField] = new[] { manualId }
             });
 
@@ -282,14 +282,27 @@ public sealed class AzureAiSearchAssetCatalogGateway : IAssetCatalogGateway
         await _assetSearchClient.MergeDocumentsAsync([patchDoc], cancellationToken: cancellationToken);
     }
 
-    public async Task LinkManualToAssetAsync(
+    public Task LinkManualToAssetAsync(
         string assetId,
         string manualId,
         double confidenceScore,
         MappingStatus status,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        UpdateLinkedManualIdsAsync(assetId, ids => ids.Add(manualId), cancellationToken);
+
+    public Task UnlinkManualFromAssetAsync(
+        string assetId,
+        string manualId,
+        CancellationToken cancellationToken = default) =>
+        UpdateLinkedManualIdsAsync(assetId, ids => ids.Remove(manualId), cancellationToken);
+
+    // Read-modify-write of the asset's LinkedManualIdsField. The change returns false when nothing changed.
+    private async Task UpdateLinkedManualIdsAsync(
+        string assetId,
+        Func<HashSet<string>, bool> change,
+        CancellationToken cancellationToken)
     {
-        // Read-modify-write of the linked-manual list. One writer at a time, or a parallel ingest can drop an id.
+        // One writer at a time, or a parallel ingest can drop an id.
         await _writeLock.WaitAsync(cancellationToken);
         try
         {
@@ -311,9 +324,9 @@ public sealed class AzureAiSearchAssetCatalogGateway : IAssetCatalogGateway
                 }
             }
 
-            if (!manualIds.Add(manualId))
+            if (!change(manualIds))
             {
-                return; // already linked
+                return; // already in the requested state
             }
 
             var patchDoc = new SearchDocument

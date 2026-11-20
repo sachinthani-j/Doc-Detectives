@@ -319,11 +319,29 @@
                             {
                                 <p class="subtle">No asset matched this manual.</p>
                             }
+                            else if (job.SelectableMatches.Count > 0)
+                            {
+                                <p class="subtle">@(job.LinksSaved
+                                    ? "Change the selection and save again. Deselecting a linked asset removes the link."
+                                    : "Nothing is linked yet. High-confidence matches are pre-selected; adjust the selection and save to link the manual.")</p>
+                            }
                             @foreach (var m in report.Mappings.OrderByDescending(m => m.ConfidenceScore))
                             {
-                                var approved = job.ApprovedAssetIds.ContainsKey(m.AssetId);
-                                var badge = approved ? ("Linked", "badge badge-ok") : UiText.Mapping(m.Status);
-                                <div class="match">
+                                var selectable = m.Status is MappingStatus.AutoLinked or MappingStatus.NeedsReview;
+                                var linked = job.LinkedAssetIds.ContainsKey(m.AssetId);
+                                var badge = !selectable ? UiText.Mapping(m.Status)
+                                    : linked ? ("Linked", "badge badge-ok")
+                                    : m.Status == MappingStatus.AutoLinked ? (job.LinksSaved ? "Not linked" : "Suggested", "badge")
+                                    : UiText.Mapping(m.Status);
+                                <label class="match @(selectable ? "selectable" : "")">
+                                    @if (selectable)
+                                    {
+                                        var assetId = m.AssetId;
+                                        <input type="checkbox" class="match-check"
+                                               checked="@IsSelected(job, assetId)"
+                                               disabled="@_saving.Contains(job.Id)"
+                                               @onchange="@(e => SetSelected(job, assetId, e.Value is true))" />
+                                    }
                                     <div class="score">
                                         <div class="pct">@((int)Math.Round(m.ConfidenceScore * 100))%</div>
                                         <div class="meter"><span style="width:@((int)Math.Round(m.ConfidenceScore * 100))%"></span></div>
@@ -335,13 +353,21 @@
                                         </div>
                                         <div class="subtle" style="margin-top:.2rem">@m.Reasoning</div>
                                     </div>
-                                    @if (m.Status == MappingStatus.NeedsReview && !approved)
+                                </label>
+                            }
+                            @if (job.SelectableMatches.Count > 0)
+                            {
+                                var dirty = HasUnsavedSelection(job);
+                                <div class="row wrap" style="gap:.5rem">
+                                    <button class="btn btn-sm btn-primary" disabled="@(!dirty || _saving.Contains(job.Id))" @onclick="@(() => SaveSelectionAsync(job))">
+                                        @if (_saving.Contains(job.Id)) { <span class="spinner"></span> } else { <Icon Name="link" Size="14" /> }
+                                        Save links
+                                    </button>
+                                    @if (dirty && !_saving.Contains(job.Id))
                                     {
-                                        <button class="btn btn-sm" disabled="@_approving.Contains(Key(job, m))" @onclick="@(() => ApproveAsync(job, m))">
-                                            @if (_approving.Contains(Key(job, m))) { <span class="spinner"></span> } else { <Icon Name="link" Size="14" /> }
-                                            Link
-                                        </button>
+                                        <button class="btn btn-sm" @onclick="@(() => _selection.Remove(job.Id))">Reset</button>
                                     }
+                                    <span class="subtle">@SelectedIds(job).Count of @job.SelectableMatches.Count selected</span>
                                 </div>
                             }
                             @if (!string.IsNullOrWhiteSpace(report.AssetCreationNote))
@@ -364,9 +390,9 @@
                             <div class="alert alert-danger"><Icon Name="alert" /> <div>@_approveError</div></div>
                         }
 
-                        @if (report.Mappings.FirstOrDefault(m => m.Status is MappingStatus.AutoLinked or MappingStatus.Created) is { } linked)
+                        @if (report.Mappings.FirstOrDefault(m => m.Status == MappingStatus.Created || job.LinkedAssetIds.ContainsKey(m.AssetId)) is { } askAsset)
                         {
-                            <div class="row wrap"><a class="btn btn-sm btn-primary" href="@UiText.AskUrl(linked.AssetId)"><Icon Name="chat" Size="14" /> Ask about @linked.AssetId</a><a class="btn btn-sm" href="@UiText.DocumentUrl(manual.ManualId)"><Icon Name="file" Size="14" /> Open document</a></div>
+                            <div class="row wrap"><a class="btn btn-sm btn-primary" href="@UiText.AskUrl(askAsset.AssetId)"><Icon Name="chat" Size="14" /> Ask about @askAsset.AssetId</a><a class="btn btn-sm" href="@UiText.DocumentUrl(manual.ManualId)"><Icon Name="file" Size="14" /> Open document</a></div>
                         }
                     </div>
                 }
@@ -410,7 +436,6 @@
         if (SelectedTile(job) == key) _selectedTile.Remove(job.Id);
         else _selectedTile[job.Id] = key;
     }
-    private readonly HashSet<string> _approving = [];
     private readonly List<string> _uploadErrors = [];
     private string? _approveError;
     private bool _uploading;
@@ -493,24 +518,47 @@
         }
     }
 
-    private static string Key(IngestionJob job, AssetMappingResult m) => $"{job.Id}:{m.AssetId}";
+    // Unsaved checkbox state per job; a job without an entry shows what is linked now.
+    private readonly Dictionary<Guid, HashSet<string>> _selection = new();
+    private readonly HashSet<Guid> _saving = [];
 
-    private async Task ApproveAsync(IngestionJob job, AssetMappingResult mapping)
+    private HashSet<string> SelectedIds(IngestionJob job) =>
+        _selection.TryGetValue(job.Id, out var selected) ? selected : job.DefaultSelection();
+
+    private bool IsSelected(IngestionJob job, string assetId) => SelectedIds(job).Contains(assetId);
+
+    private void SetSelected(IngestionJob job, string assetId, bool selected)
     {
-        var key = Key(job, mapping);
-        _approving.Add(key);
+        if (!_selection.TryGetValue(job.Id, out var set))
+        {
+            set = job.DefaultSelection();
+            _selection[job.Id] = set;
+        }
+
+        if (selected) set.Add(assetId);
+        else set.Remove(assetId);
+    }
+
+    // Before the first save the suggested selection counts as unsaved too, so it can be confirmed as is.
+    private bool HasUnsavedSelection(IngestionJob job) =>
+        !SelectedIds(job).SetEquals(job.LinkedAssetIds.Keys) || (!job.LinksSaved && SelectedIds(job).Count > 0);
+
+    private async Task SaveSelectionAsync(IngestionJob job)
+    {
+        _saving.Add(job.Id);
         _approveError = null;
         try
         {
-            await Jobs.ApproveMatchAsync(job, mapping);
+            await Jobs.SaveMatchSelectionAsync(job, SelectedIds(job));
+            _selection.Remove(job.Id);
         }
         catch (Exception ex)
         {
-            _approveError = $"Could not link {mapping.AssetId}: {ex.Message}";
+            _approveError = $"Could not save the asset links: {ex.Message}";
         }
         finally
         {
-            _approving.Remove(key);
+            _saving.Remove(job.Id);
         }
     }
 
