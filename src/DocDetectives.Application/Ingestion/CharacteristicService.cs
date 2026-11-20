@@ -2,6 +2,8 @@
 using DocDetectives.Application.Skills;
 using DocDetectives.Domain.Abstractions;
 using DocDetectives.Domain.Entities;
+using Microsoft.Extensions.Logging;
+using System.Diagnostics;
 
 namespace DocDetectives.Application.Ingestion;
 
@@ -18,9 +20,19 @@ public sealed record CharacteristicReport(
 public sealed class CharacteristicService(
     CharacteristicExtractionSkill extractionSkill,
     ICharacteristicCatalog catalog,
-    IAssetCatalogGateway assetCatalog)
+    IAssetCatalogGateway assetCatalog,
+    ILogger<CharacteristicService> logger)
 {
     private readonly SemaphoreSlim _masterLock = new(1, 1);
+
+    // Logs the time of one part of the characteristics step, to see where it spends its time.
+    private void LogPart(string fileName, string part, Stopwatch watch, string? detail = null)
+    {
+        logger.LogInformation(
+            "Ingest {File}: characteristics - {Part} took {Seconds:0.0} s{Detail}",
+            fileName, part, watch.Elapsed.TotalSeconds, detail is null ? "" : $" ({detail})");
+        watch.Restart();
+    }
 
     // Entries saved during this run, in case the search index has not made them visible yet.
     private readonly Dictionary<string, CharacteristicDefinition> _savedThisRun = [];
@@ -36,13 +48,19 @@ public sealed class CharacteristicService(
             return new CharacteristicReport([], 0, 0, "None: the manual has no technical specifications.");
         }
 
+        var watch = Stopwatch.StartNew();
+
         // An asset created moments ago can take a second or two to become searchable.
         var asset = await assetCatalog.GetAssetByIdAsync(assetId, cancellationToken);
+        var retries = 0;
         for (var attempt = 1; asset is null && attempt <= 3; attempt++)
         {
+            retries++;
             await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
             asset = await assetCatalog.GetAssetByIdAsync(assetId, cancellationToken);
         }
+
+        LogPart(manual.FileName, "asset lookup", watch, retries > 0 ? $"{retries} retry(ies)" : null);
 
         if (asset is null)
         {
@@ -50,13 +68,18 @@ public sealed class CharacteristicService(
         }
 
         var extracted = await ExtractAsync(asset, manual, cancellationToken);
+        watch.Restart();
+
         var resolution = await ResolveAndSaveMasterAsync(extracted, asset.Category, manual.FileName, cancellationToken);
+        watch.Restart();
 
         var merge = CharacteristicResolver.MergeIntoAsset(asset.Characteristics, resolution.Values);
         if (merge.Filled.Count > 0)
         {
             await assetCatalog.UpdateCharacteristicsAsync(asset.Id, merge.Merged, cancellationToken);
         }
+
+        LogPart(manual.FileName, "asset update", watch, $"{merge.Filled.Count} value(s) filled");
 
         var note = $"Filled {merge.Filled.Count} characteristic(s) on asset '{asset.Id}'" +
                    (merge.SkippedExisting > 0 ? $", kept {merge.SkippedExisting} existing value(s)" : "") +
@@ -81,11 +104,17 @@ public sealed class CharacteristicService(
             return [];
         }
 
-        // The AI call runs outside the master lock so parallel documents don't wait on each other.
-        var extraction = await extractionSkill.ExtractAsync(
-            asset, manual, specifications, await LoadMasterAsync(cancellationToken), cancellationToken);
+        var watch = Stopwatch.StartNew();
+        var master = await LoadMasterAsync(cancellationToken);
+        LogPart(manual.FileName, "master table load", watch, $"{master.Count} entries");
 
-        return extraction.Characteristics ?? [];
+        // The AI call runs outside the master lock so parallel documents don't wait on each other.
+        var extraction = await extractionSkill.ExtractAsync(asset, manual, specifications, master, cancellationToken);
+        var characteristics = extraction.Characteristics ?? [];
+        LogPart(manual.FileName, "AI extraction", watch,
+            $"{specifications.Count} spec(s) in, {characteristics.Count} characteristic(s) out");
+
+        return characteristics;
     }
 
     /// <summary>What the values would look like against the current master table, without saving anything (for review).</summary>
@@ -109,17 +138,23 @@ public sealed class CharacteristicService(
     {
         // One document at a time updates the master table, so two manuals that find the same new
         // characteristic at once still end up with a single master entry.
+        var watch = Stopwatch.StartNew();
         await _masterLock.WaitAsync(cancellationToken);
+        LogPart(sourceFileName, "master lock wait", watch);
         try
         {
+            var master = await LoadMasterAsync(cancellationToken);
+            LogPart(sourceFileName, "master table reload", watch, $"{master.Count} entries");
+
             var resolution = CharacteristicResolver.Resolve(
                 extracted,
-                await LoadMasterAsync(cancellationToken),
+                master,
                 equipmentType,
                 sourceFileName,
                 DateTimeOffset.UtcNow);
 
             await catalog.SaveAsync(resolution.DefinitionsToSave, cancellationToken);
+            LogPart(sourceFileName, "master table save", watch, $"{resolution.DefinitionsToSave.Count} definition(s)");
             foreach (var definition in resolution.DefinitionsToSave)
             {
                 _savedThisRun[definition.Id] = definition;

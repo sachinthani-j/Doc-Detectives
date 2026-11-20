@@ -3,6 +3,8 @@ using DocDetectives.Application.Skills;
 using DocDetectives.Domain.Abstractions;
 using DocDetectives.Domain.Entities;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 
@@ -66,7 +68,8 @@ public sealed class ManualIngestionOrchestrator(
     IAssetCatalogGateway assetCatalog,
     MarkdownManualChunker chunker,
     IEmbeddingGenerator<string, Embedding<float>> embeddingGenerator,
-    IKnowledgeIndex knowledgeIndex)
+    IKnowledgeIndex knowledgeIndex,
+    ILogger<ManualIngestionOrchestrator> logger)
 {
     private static readonly HashSet<string> SupportedExtensions =
         new(StringComparer.OrdinalIgnoreCase) { ".pdf", ".docx", ".doc", ".png", ".jpg", ".jpeg", ".tiff" };
@@ -98,89 +101,182 @@ public sealed class ManualIngestionOrchestrator(
         bool reviewNewAssets = true,
         bool createInspectionJobs = false,
         IProgress<IngestionStage>? progress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool linkMatchedAssets = true)
     {
+        var fileName = Path.GetFileName(filePath);
+        var total = Stopwatch.StartNew();
+
         // 1. Extract layout-aware Markdown via Azure AI Content Understanding
         progress?.Report(IngestionStage.ExtractingContent);
-        ExtractedManual rawDocument;
-        await using (var stream = File.OpenRead(filePath))
+        var rawDocument = await TimeAsync(fileName, "Content extraction", async () =>
         {
-            rawDocument = await manualExtractor.ExtractAsync(stream, Path.GetFileName(filePath), cancellationToken);
-        }
+            await using var stream = File.OpenRead(filePath);
+            return await manualExtractor.ExtractAsync(stream, fileName, cancellationToken);
+        });
 
-        // 2. Decide what kind of document this is
+        // 2. Decide what kind of document this is. The structure extraction (the slowest AI call) starts at the
+        //    same time, since nearly every upload is a manual; it is cancelled when the document is an inspection.
         progress?.Report(IngestionStage.AnalyzingStructure);
-        var classification = await classificationSkill.ClassifyAsync(rawDocument, cancellationToken);
+        using var structureCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var structureTask = TimeAsync(fileName, "Structure extraction",
+            () => structureExtractionSkill.ExtractStructureAsync(rawDocument, structureCts.Token));
+
+        DocumentClassification classification;
+        try
+        {
+            classification = await TimeAsync(fileName, "Classification",
+                () => classificationSkill.ClassifyAsync(rawDocument, cancellationToken));
+        }
+        catch
+        {
+            await CancelAndIgnoreAsync(structureCts, structureTask);
+            throw;
+        }
 
         if (classification.DocumentType == DocumentType.Inspection)
         {
+            await CancelAndIgnoreAsync(structureCts, structureTask);
+
             // Jobs are off by default: the checklist becomes a draft job plan, which finds its asset itself.
             var inspection = createInspectionJobs
-                ? await inspectionJobService.ProcessAsync(rawDocument, autoLinkThreshold, cancellationToken)
+                ? await TimeAsync(fileName, "Inspection job",
+                    () => inspectionJobService.ProcessAsync(rawDocument, autoLinkThreshold, cancellationToken))
                 : null;
             var inspectionPlans = generateJobPlans
-                ? await jobPlanService.DraftAsync(
-                    rawDocument, DocumentType.Inspection, inspection?.Asset?.Id, autoLinkThreshold, cancellationToken)
+                ? await TimeAsync(fileName, "Job plan drafting", () => jobPlanService.DraftAsync(
+                    rawDocument, DocumentType.Inspection, inspection?.Asset?.Id, autoLinkThreshold, cancellationToken))
                 : null;
 
             progress?.Report(IngestionStage.Completed);
+            LogTotal(fileName, total);
             return new DocumentProcessingReport(
                 rawDocument.ManualId, rawDocument.FileName, classification, null, inspection, inspectionPlans);
         }
 
-        var manual = await ProcessManualAsync(rawDocument, autoLinkThreshold, autoCreateAssets, reviewNewAssets, progress, cancellationToken);
+        var structure = await structureTask;
+
+        // 3-4. Match against existing assets, and create or propose a new asset tree when nothing matched.
+        var match = await TimeAsync(fileName, "Asset matching", () => MatchAssetsAsync(
+            rawDocument, structure, autoLinkThreshold, autoCreateAssets, reviewNewAssets, linkMatchedAssets, progress,
+            cancellationToken));
+        var enrichedManual = match.Manual;
 
         // The manual's asset: the one just created or proposed, otherwise the best auto-linked existing asset.
         // A proposed asset keeps its ID through review, so drafted job plans can already point to it.
-        var manualAssetId = manual.CreatedAssets.FirstOrDefault()?.Id
-                            ?? manual.ProposedAssets.FirstOrDefault()?.Id
-                            ?? manual.Mappings
+        var manualAssetId = match.CreatedAssets.FirstOrDefault()?.Id
+                            ?? match.ProposedAssets.FirstOrDefault()?.Id
+                            ?? match.Mappings
                                 .Where(m => m.Status == MappingStatus.AutoLinked)
                                 .OrderByDescending(m => m.ConfidenceScore)
                                 .FirstOrDefault()?.AssetId;
 
-        // The enriched manual carries the extracted manufacturer and models onto the plans.
-        var manualPlans = generateJobPlans
-            ? await jobPlanService.DraftAsync(
-                manual.ExtractedManual, DocumentType.Manual, manualAssetId, autoLinkThreshold, cancellationToken)
-            : null;
+        // 5-7. These three only need the extracted structure and the matched asset, not each other: run them at once.
+        //      Embedding and indexing the sections for chat:
+        var embedTask = TimeAsync(fileName, "Embedding + indexing",
+            () => EmbedAndStoreAsync(enrichedManual, structure, match.LinkedAssetIds, progress, cancellationToken));
 
+        // Draft job plans; the enriched manual carries the extracted manufacturer and models onto the plans.
+        var plansTask = generateJobPlans
+            ? TimeAsync<JobPlanReport?>(fileName, "Job plan drafting", async () => await jobPlanService.DraftAsync(
+                enrichedManual, DocumentType.Manual, manualAssetId, autoLinkThreshold, cancellationToken))
+            : Task.FromResult<JobPlanReport?>(null);
+
+        // Characteristics (and manufacturer details) of the manual's asset.
+        var assetDetailsTask = TimeAsync(fileName, "Characteristics", () => FillAssetDetailsAsync(
+            match, enrichedManual, manualAssetId, extractCharacteristics, cancellationToken));
+
+        await Task.WhenAll(embedTask, plansTask, assetDetailsTask);
+
+        var manual = new ManualProcessingReport(
+            enrichedManual, match.Mappings, embedTask.Result, match.AssetCreationNote, match.CreatedAssets, match.ProposedAssets);
+        var details = assetDetailsTask.Result;
+
+        progress?.Report(IngestionStage.Completed);
+        LogTotal(fileName, total);
+        return new DocumentProcessingReport(
+            rawDocument.ManualId, rawDocument.FileName, classification, manual, null, plansTask.Result,
+            details.Characteristics, details.Proposal, details.ManufacturerNote);
+    }
+
+    private sealed record AssetDetails(
+        CharacteristicReport? Characteristics,
+        AssetProposal? Proposal,
+        string? ManufacturerNote);
+
+    private async Task<AssetDetails> FillAssetDetailsAsync(
+        AssetMatch match,
+        ExtractedManual enrichedManual,
+        string? manualAssetId,
+        bool extractCharacteristics,
+        CancellationToken cancellationToken)
+    {
         // A proposed asset does not exist yet: extract its characteristics now and apply them when it is approved.
-        if (manual.ProposedAssets.Count > 0)
+        if (match.ProposedAssets.Count > 0)
         {
             var proposedCharacteristics = extractCharacteristics
-                ? await characteristicService.ExtractAsync(manual.ProposedAssets[0], manual.ExtractedManual, cancellationToken)
+                ? await characteristicService.ExtractAsync(match.ProposedAssets[0], enrichedManual, cancellationToken)
                 : [];
 
-            var proposal = new AssetProposal(
-                manual.ExtractedManual.ManualId,
-                manual.ExtractedManual.FileName,
-                manual.ProposedAssets,
-                proposedCharacteristics);
-
-            progress?.Report(IngestionStage.Completed);
-            return new DocumentProcessingReport(
-                rawDocument.ManualId, rawDocument.FileName, classification, manual, null, manualPlans, null, proposal);
+            return new AssetDetails(null, new AssetProposal(
+                enrichedManual.ManualId,
+                enrichedManual.FileName,
+                match.ProposedAssets,
+                proposedCharacteristics), null);
         }
 
         // Characteristics go straight onto an existing (or just created) asset; only empty ones are filled.
         var characteristics = extractCharacteristics && manualAssetId is not null
-            ? await characteristicService.FillFromManualAsync(manualAssetId, manual.ExtractedManual, cancellationToken)
+            ? await characteristicService.FillFromManualAsync(manualAssetId, enrichedManual, cancellationToken)
             : null;
 
         // A matched existing asset gets the manufacturer name and build year from the manual, if it has none yet.
-        var manufacturerNote = manualAssetId is not null && manual.CreatedAssets.Count == 0
-            ? await FillManufacturerDetailsAsync(
+        // Runs after the characteristics so the two updates of the same asset never overlap.
+        var manufacturerNote = manualAssetId is not null && match.CreatedAssets.Count == 0
+            ? await TimeAsync(enrichedManual.FileName, "Manufacturer details", () => FillManufacturerDetailsAsync(
                 manualAssetId,
-                manual.ExtractedManual.Manufacturer,
-                AssetTreeBuilder.ValidYear(manual.ExtractedManual.AssetStructure?.ManufactureYear),
-                cancellationToken)
+                enrichedManual.Manufacturer,
+                AssetTreeBuilder.ValidYear(enrichedManual.AssetStructure?.ManufactureYear),
+                cancellationToken))
             : null;
 
-        progress?.Report(IngestionStage.Completed);
-        return new DocumentProcessingReport(
-            rawDocument.ManualId, rawDocument.FileName, classification, manual, null, manualPlans, characteristics,
-            null, manufacturerNote);
+        return new AssetDetails(characteristics, null, manufacturerNote);
+    }
+
+    // Logs how long one ingestion step took (also when it failed), to see where an upload spends its time.
+    private async Task<T> TimeAsync<T>(string fileName, string step, Func<Task<T>> action)
+    {
+        var watch = Stopwatch.StartNew();
+        var succeeded = false;
+        try
+        {
+            var result = await action();
+            succeeded = true;
+            return result;
+        }
+        finally
+        {
+            logger.LogInformation(
+                "Ingest {File}: {Step} {Outcome} in {Seconds:0.0} s",
+                fileName, step, succeeded ? "finished" : "stopped", watch.Elapsed.TotalSeconds);
+        }
+    }
+
+    private void LogTotal(string fileName, Stopwatch total) =>
+        logger.LogInformation("Ingest {File}: total {Seconds:0.0} s", fileName, total.Elapsed.TotalSeconds);
+
+    // Stops a background step whose result is no longer needed, and waits for it so no error goes unobserved.
+    private static async Task CancelAndIgnoreAsync(CancellationTokenSource cts, Task task)
+    {
+        await cts.CancelAsync();
+        try
+        {
+            await task;
+        }
+        catch
+        {
+            // Cancelled or failed: the result is not used.
+        }
     }
 
     // Only empty fields are filled; a value already on the asset is never overwritten.
@@ -219,16 +315,27 @@ public sealed class ManualIngestionOrchestrator(
         }.OfType<string>()) + $" on asset '{assetId}'.";
     }
 
-    private async Task<ManualProcessingReport> ProcessManualAsync(
+    /// <param name="Manual">The manual enriched with the extracted manufacturer, models and structure.</param>
+    /// <param name="LinkedAssetIds">Asset IDs the manual's sections are tagged with for chat.</param>
+    private sealed record AssetMatch(
+        ExtractedManual Manual,
+        IReadOnlyList<AssetMappingResult> Mappings,
+        string AssetCreationNote,
+        IReadOnlyList<Asset> CreatedAssets,
+        IReadOnlyList<Asset> ProposedAssets,
+        IReadOnlyList<string> LinkedAssetIds);
+
+    private async Task<AssetMatch> MatchAssetsAsync(
         ExtractedManual rawManual,
+        EquipmentAssetStructure structure,
         double autoLinkThreshold,
         bool autoCreateAssets,
         bool reviewNewAssets,
+        bool linkMatchedAssets,
         IProgress<IngestionStage>? progress,
         CancellationToken cancellationToken)
     {
-        // 3. Extract typed equipment asset structure via LLM Structured Outputs
-        var structure = await structureExtractionSkill.ExtractStructureAsync(rawManual, cancellationToken);
+        // 3. The typed equipment asset structure (extracted by the caller) enriches the manual's metadata
         var enrichedManual = rawManual with
         {
             Manufacturer = structure.Manufacturer ?? rawManual.Manufacturer,
@@ -237,11 +344,13 @@ public sealed class ManualIngestionOrchestrator(
             AssetStructure = structure
         };
 
-        // 4. Match extracted asset metadata against existing system assets
+        // 4. Match extracted asset metadata against existing system assets.
+        //    With linkMatchedAssets off, nothing is written: a person picks the assets to link afterwards.
         progress?.Report(IngestionStage.MatchingAssets);
         IReadOnlyList<AssetMappingResult> mappings = await matchingSkill.MatchManualToAssetsAsync(
             enrichedManual,
             autoLinkThreshold,
+            persistLinks: linkMatchedAssets,
             cancellationToken: cancellationToken);
 
         // 4b. No existing asset matched at all: create one if the manual has enough information.
@@ -319,6 +428,17 @@ public sealed class ManualIngestionOrchestrator(
             .Distinct()
             .ToList();
 
+        return new AssetMatch(enrichedManual, mappings, assetCreationNote, createdAssets, proposedAssets, linkedAssetIds);
+    }
+
+    /// <summary>Embeds the manual's sections (plus a structured summary) and stores them for chat. Returns the chunk count.</summary>
+    private async Task<int> EmbedAndStoreAsync(
+        ExtractedManual enrichedManual,
+        EquipmentAssetStructure structure,
+        IReadOnlyList<string> linkedAssetIds,
+        IProgress<IngestionStage>? progress,
+        CancellationToken cancellationToken)
+    {
         // 5. Build chunks: prepend the extracted structured asset summary + section Markdown chunks
         var allChunks = new List<ManualChunk>
         {
@@ -346,7 +466,7 @@ public sealed class ManualIngestionOrchestrator(
         progress?.Report(IngestionStage.StoringInIndex);
         await knowledgeIndex.UpsertChunksAsync(vectorizedChunks, cancellationToken);
 
-        return new ManualProcessingReport(enrichedManual, mappings, vectorizedChunks.Count, assetCreationNote, createdAssets, proposedAssets);
+        return vectorizedChunks.Count;
     }
 
     // The embedding model accepts at most 8192 tokens per input. Technical text (part numbers, tables)
