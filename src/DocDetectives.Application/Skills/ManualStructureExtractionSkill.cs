@@ -16,6 +16,10 @@ public sealed class ManualStructureExtractionSkill(IChatClient chatClient)
             You are an industrial equipment documentation analyst. Extract the structured asset data from the technical manual below.
             Preserve exact OEM part/article numbers, model numbers, error codes, and numeric tolerances/limits.
             EquipmentName is the product name as the manual titles it (e.g. "EFG 213-320 Electric Forklift Truck"), without the manufacturer name.
+            Manufacturer is the full company name of the equipment maker (e.g. "Baltimore Aircoil Company", "DIOSNA Dierks & Soehne GmbH").
+            ManufactureYear is the year the equipment itself was built, only when the manual states it explicitly
+            (e.g. a filled-in nameplate, "Year of manufacture", "Baujahr", "Bouwjaar"). Never use the document, revision,
+            print or copyright date. Otherwise null.
             If a field is not present in the manual, return null or an empty list—do not guess.
 
             SubAssets: propose the asset hierarchy below the whole equipment, following the rules below.
@@ -47,17 +51,9 @@ public sealed class ManualStructureExtractionSkill(IChatClient chatClient)
             CalibrationAndMaintenance: null,
             SpareParts: [],
             FaultCodes: [],
-            SubAssets: []);
+            SubAssets: [],
+            ManufactureYear: null);
     }
 
-    private static readonly string AssetStructureRules = LoadPrompt("asset-structure.md");
-
-    private static string LoadPrompt(string fileName)
-    {
-        using var stream = typeof(ManualStructureExtractionSkill).Assembly
-            .GetManifestResourceStream($"DocDetectives.Prompts.{fileName}")
-            ?? throw new InvalidOperationException($"Embedded prompt '{fileName}' not found.");
-        using var reader = new StreamReader(stream);
-        return reader.ReadToEnd();
-    }
+    private static readonly string AssetStructureRules = PromptLoader.Load("asset-structure.md");
 }

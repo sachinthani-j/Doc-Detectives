@@ -9,6 +9,21 @@ public sealed class DocDetectivesOptions
     public bool AutoCreateAssets { get; set; } = true;
 
     /// <summary>
+    /// Show each new asset (with sub-assets, spare parts and characteristics) for review before creating it.
+    /// Turn off for unattended runs: new assets are then created immediately.
+    /// </summary>
+    public bool ReviewNewAssets { get; set; } = true;
+
+    /// <summary>Draft job plans from every manual and inspection document (one extra AI call per document).</summary>
+    public bool GenerateJobPlans { get; set; } = true;
+
+    /// <summary>Also create a job from each inspection document (off: inspection documents only give job plans).</summary>
+    public bool CreateInspectionJobs { get; set; } = false;
+
+    /// <summary>Fill asset characteristics from manuals (only empty ones; new characteristics join the master table).</summary>
+    public bool ExtractCharacteristics { get; set; } = true;
+
+    /// <summary>
     /// How many documents to ingest at once. Each document still goes through Content Understanding,
     /// classification, extraction, matching, and embedding in that order.
     /// </summary>
@@ -67,10 +82,15 @@ public sealed class AzureSearchOptions
     public string IndexName { get; set; } = "docdetectives-manuals";
     public string AssetsIndexName { get; set; } = "assets";
     public string JobsIndexName { get; set; } = "docdetectives-jobs";
+    public string JobPlansIndexName { get; set; } = "docdetectives-jobplans";
+    public string CharacteristicsIndexName { get; set; } = "docdetectives-characteristics";
     public string AssetKeyField { get; set; } = "key";
     public string AssetIdField { get; set; } = "assetId";
     public string LinkedManualIdsField { get; set; } = "linkedManualIds";
     public string ParentAssetIdField { get; set; } = "parentAssetId";
     public string SparePartsField { get; set; } = "spareParts";
+    public string CharacteristicsField { get; set; } = "characteristics";
+    public string ManufactureYearField { get; set; } = "manufactureYear";
+    public string ManufacturerNameField { get; set; } = "manufacturerName";
     public int EmbeddingDimensions { get; set; } = 3072;
 }

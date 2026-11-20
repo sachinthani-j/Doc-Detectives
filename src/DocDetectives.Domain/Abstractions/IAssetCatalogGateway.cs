@@ -33,6 +33,19 @@ public interface IAssetCatalogGateway
         string manualId,
         CancellationToken cancellationToken = default);
 
+    /// <summary>Replaces the asset's characteristic values with the given list.</summary>
+    Task UpdateCharacteristicsAsync(
+        string assetId,
+        IReadOnlyList<AssetCharacteristic> characteristics,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Sets the manufacturer name and/or build year; a null argument leaves that field unchanged.</summary>
+    Task UpdateManufacturerDetailsAsync(
+        string assetId,
+        string? manufacturerName,
+        int? manufactureYear,
+        CancellationToken cancellationToken = default);
+
     Task LinkManualToAssetAsync(
         string assetId,
         string manualId,

@@ -19,7 +19,7 @@ public sealed class AzureAiSearchAssetCatalogGateway : IAssetCatalogGateway
     private readonly SearchIndexClient _indexClient;
     private readonly SemaphoreSlim _schemaLock = new(1, 1);
     private readonly SemaphoreSlim _writeLock = new(1, 1);
-    private bool _sparePartsFieldReady;
+    private bool _extraFieldsReady;
     private readonly DocDetectives.Infrastructure.Configuration.AzureSearchOptions _cfg;
 
     public AzureAiSearchAssetCatalogGateway(IOptions<DocDetectivesOptions> options)
@@ -122,7 +122,7 @@ public sealed class AzureAiSearchAssetCatalogGateway : IAssetCatalogGateway
         await _writeLock.WaitAsync(cancellationToken);
         try
         {
-            await EnsureSparePartsFieldAsync(cancellationToken);
+            await EnsureExtraFieldsAsync(cancellationToken);
 
             // The manual link is written in the same upload: a lookup straight after an upload may not see the new documents yet.
             // Every field written here must exist in the assets index schema, or the upload is rejected.
@@ -137,6 +137,9 @@ public sealed class AzureAiSearchAssetCatalogGateway : IAssetCatalogGateway
                 ["category"] = asset.Category,
                 [_cfg.ParentAssetIdField] = asset.ParentAssetId,
                 [_cfg.SparePartsField] = (asset.SpareParts ?? []).ToArray(),
+            [_cfg.ManufactureYearField] = asset.ManufactureYear,
+            [_cfg.ManufacturerNameField] = asset.ManufacturerName,
+            [_cfg.CharacteristicsField] = ToCharacteristicDocuments(asset.Characteristics ?? []),
                 [_cfg.LinkedManualIdsField] = new[] { manualId }
             });
 
@@ -149,11 +152,11 @@ public sealed class AzureAiSearchAssetCatalogGateway : IAssetCatalogGateway
         }
     }
 
-    // Adds the spare-parts (bill of materials) field to the assets index once, if it is not there yet.
-    // Adding a field is non-breaking in Azure AI Search: existing documents simply have no value for it.
-    private async Task EnsureSparePartsFieldAsync(CancellationToken cancellationToken)
+    // Adds the spare-parts (bill of materials) and characteristics fields to the assets index once, if missing.
+    // Adding fields is non-breaking in Azure AI Search: existing documents simply have no value for them.
+    private async Task EnsureExtraFieldsAsync(CancellationToken cancellationToken)
     {
-        if (_sparePartsFieldReady)
+        if (_extraFieldsReady)
         {
             return;
         }
@@ -161,24 +164,122 @@ public sealed class AzureAiSearchAssetCatalogGateway : IAssetCatalogGateway
         await _schemaLock.WaitAsync(cancellationToken);
         try
         {
-            if (_sparePartsFieldReady)
+            if (_extraFieldsReady)
             {
                 return;
             }
 
             SearchIndex index = await _indexClient.GetIndexAsync(_cfg.AssetsIndexName, cancellationToken);
+            var changed = false;
+
             if (!index.Fields.Any(f => f.Name == _cfg.SparePartsField))
             {
                 index.Fields.Add(new SearchableField(_cfg.SparePartsField, collection: true) { IsFilterable = true });
+                changed = true;
+            }
+
+            if (!index.Fields.Any(f => f.Name == _cfg.ManufacturerNameField))
+            {
+                index.Fields.Add(new SearchableField(_cfg.ManufacturerNameField) { IsFilterable = true, IsFacetable = true });
+                changed = true;
+            }
+
+            if (!index.Fields.Any(f => f.Name == _cfg.ManufactureYearField))
+            {
+                index.Fields.Add(new SimpleField(_cfg.ManufactureYearField, SearchFieldDataType.Int32) { IsFilterable = true });
+                changed = true;
+            }
+
+            if (!index.Fields.Any(f => f.Name == _cfg.CharacteristicsField))
+            {
+                index.Fields.Add(new ComplexField(_cfg.CharacteristicsField, collection: true)
+                {
+                    Fields =
+                    {
+                        new SimpleField("characteristicId", SearchFieldDataType.String) { IsFilterable = true },
+                        new SearchableField("name") { IsFilterable = true },
+                        new SimpleField("valueType", SearchFieldDataType.String) { IsFilterable = true },
+                        new SimpleField("numericValue", SearchFieldDataType.Double) { IsFilterable = true },
+                        new SimpleField("unit", SearchFieldDataType.String),
+                        new SimpleField("unitSymbol", SearchFieldDataType.String),
+                        new SimpleField("booleanValue", SearchFieldDataType.Boolean) { IsFilterable = true },
+                        new SearchableField("textValue") { IsFilterable = true },
+                        new SimpleField("dateValue", SearchFieldDataType.String),
+                        new SimpleField("source", SearchFieldDataType.String),
+                        new SimpleField("extractedUtc", SearchFieldDataType.DateTimeOffset)
+                    }
+                });
+                changed = true;
+            }
+
+            if (changed)
+            {
                 await _indexClient.CreateOrUpdateIndexAsync(index, cancellationToken: cancellationToken);
             }
 
-            _sparePartsFieldReady = true;
+            _extraFieldsReady = true;
         }
         finally
         {
             _schemaLock.Release();
         }
+    }
+
+    public async Task UpdateCharacteristicsAsync(
+        string assetId,
+        IReadOnlyList<AssetCharacteristic> characteristics,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureExtraFieldsAsync(cancellationToken);
+
+        var existingDoc = await FindDocumentByAssetIdAsync(assetId, cancellationToken);
+        if (existingDoc is null)
+        {
+            return;
+        }
+
+        // A complex collection is replaced as a whole, so the caller passes the full merged list.
+        var patchDoc = new SearchDocument
+        {
+            [_cfg.AssetKeyField] = existingDoc[_cfg.AssetKeyField],
+            [_cfg.CharacteristicsField] = ToCharacteristicDocuments(characteristics)
+        };
+
+        await _assetSearchClient.MergeDocumentsAsync([patchDoc], cancellationToken: cancellationToken);
+    }
+
+    public async Task UpdateManufacturerDetailsAsync(
+        string assetId,
+        string? manufacturerName,
+        int? manufactureYear,
+        CancellationToken cancellationToken = default)
+    {
+        if (manufacturerName is null && manufactureYear is null)
+        {
+            return;
+        }
+
+        await EnsureExtraFieldsAsync(cancellationToken);
+
+        var existingDoc = await FindDocumentByAssetIdAsync(assetId, cancellationToken);
+        if (existingDoc is null)
+        {
+            return;
+        }
+
+        // Merge writes only the fields present, so the one not being set keeps its value.
+        var patchDoc = new SearchDocument { [_cfg.AssetKeyField] = existingDoc[_cfg.AssetKeyField] };
+        if (manufacturerName is not null)
+        {
+            patchDoc[_cfg.ManufacturerNameField] = manufacturerName;
+        }
+
+        if (manufactureYear is not null)
+        {
+            patchDoc[_cfg.ManufactureYearField] = manufactureYear;
+        }
+
+        await _assetSearchClient.MergeDocumentsAsync([patchDoc], cancellationToken: cancellationToken);
     }
 
     public async Task LinkManualToAssetAsync(
@@ -287,6 +388,46 @@ public sealed class AzureAiSearchAssetCatalogGateway : IAssetCatalogGateway
             ParentAssetId: ReadField(_cfg.ParentAssetIdField) is { Length: > 0 } parentId ? parentId : null,
             SpareParts: doc.TryGetValue(_cfg.SparePartsField, out var rawParts) && rawParts is IEnumerable<object> parts
                 ? parts.Select(p => p?.ToString()).OfType<string>().ToList()
-                : []);
+                : [],
+            Characteristics: doc.TryGetValue(_cfg.CharacteristicsField, out var rawChars) && rawChars is IEnumerable<object> chars
+                ? chars.OfType<SearchDocument>().Select(MapCharacteristic).ToList()
+                : [],
+            // The export uses 0 for "unknown year".
+            ManufactureYear: int.TryParse(ReadField(_cfg.ManufactureYearField), out var year) && year > 0 ? year : null,
+            ManufacturerName: ReadField(_cfg.ManufacturerNameField) is { Length: > 0 } makerName ? makerName : null);
+    }
+
+    private static SearchDocument[] ToCharacteristicDocuments(IReadOnlyList<AssetCharacteristic> characteristics) =>
+        characteristics.Select(c => new SearchDocument
+        {
+            ["characteristicId"] = c.CharacteristicId,
+            ["name"] = c.Name,
+            ["valueType"] = c.ValueType,
+            ["numericValue"] = c.NumericValue,
+            ["unit"] = c.Unit,
+            ["unitSymbol"] = c.UnitSymbol,
+            ["booleanValue"] = c.BooleanValue,
+            ["textValue"] = c.TextValue,
+            ["dateValue"] = c.DateValue,
+            ["source"] = c.Source,
+            ["extractedUtc"] = c.ExtractedUtc
+        }).ToArray();
+
+    private static AssetCharacteristic MapCharacteristic(SearchDocument c)
+    {
+        string? Text(string field) => c.TryGetValue(field, out var v) && v is not null ? v.ToString() : null;
+
+        return new AssetCharacteristic(
+            CharacteristicId: Text("characteristicId") ?? string.Empty,
+            Name: Text("name") ?? string.Empty,
+            ValueType: Text("valueType") ?? CharacteristicValueType.Alphanumeric,
+            NumericValue: c.TryGetValue("numericValue", out var n) && n is not null ? Convert.ToDouble(n) : null,
+            Unit: Text("unit"),
+            UnitSymbol: Text("unitSymbol"),
+            BooleanValue: c.TryGetValue("booleanValue", out var b) && b is bool flag ? flag : null,
+            TextValue: Text("textValue"),
+            DateValue: Text("dateValue"),
+            Source: Text("source"),
+            ExtractedUtc: c.TryGetValue("extractedUtc", out var d) && d is DateTimeOffset when ? when : DateTimeOffset.MinValue);
     }
 }

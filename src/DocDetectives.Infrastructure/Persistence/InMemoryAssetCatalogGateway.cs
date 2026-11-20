@@ -75,6 +75,45 @@ public sealed class InMemoryAssetCatalogGateway : IAssetCatalogGateway
         return Task.CompletedTask;
     }
 
+    public Task UpdateCharacteristicsAsync(
+        string assetId,
+        IReadOnlyList<AssetCharacteristic> characteristics,
+        CancellationToken cancellationToken = default)
+    {
+        lock (_assets)
+        {
+            var index = _assets.FindIndex(a => a.Id.Equals(assetId, StringComparison.OrdinalIgnoreCase));
+            if (index >= 0)
+            {
+                _assets[index] = _assets[index] with { Characteristics = characteristics };
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public Task UpdateManufacturerDetailsAsync(
+        string assetId,
+        string? manufacturerName,
+        int? manufactureYear,
+        CancellationToken cancellationToken = default)
+    {
+        lock (_assets)
+        {
+            var index = _assets.FindIndex(a => a.Id.Equals(assetId, StringComparison.OrdinalIgnoreCase));
+            if (index >= 0)
+            {
+                _assets[index] = _assets[index] with
+                {
+                    ManufacturerName = manufacturerName ?? _assets[index].ManufacturerName,
+                    ManufactureYear = manufactureYear ?? _assets[index].ManufactureYear
+                };
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
     public Task LinkManualToAssetAsync(
         string assetId,
         string manualId,

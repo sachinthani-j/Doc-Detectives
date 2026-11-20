@@ -124,7 +124,10 @@ public static class AssetTreeBuilder
                 SerialNumber: string.Empty, // manuals describe an equipment type, not a physical unit
                 Category: structure.EquipmentCategory?.Trim() ?? string.Empty,
                 ParentAssetId: null,
-                SpareParts: PartsOf(rootId))
+                SpareParts: PartsOf(rootId),
+                Characteristics: null,
+                ManufactureYear: ValidYear(structure.ManufactureYear),
+                ManufacturerName: manufacturer)
         };
 
         // Parents before children, so the list reads top-down.
@@ -138,11 +141,18 @@ public static class AssetTreeBuilder
                 SerialNumber: string.Empty,
                 Category: string.Empty,
                 ParentAssetId: place.ParentId,
-                SpareParts: PartsOf(place.Id)));
+                SpareParts: PartsOf(place.Id),
+                Characteristics: null,
+                ManufactureYear: null, // components can be replaced; their build year is not the machine's
+                ManufacturerName: manufacturer));
         }
 
         return assets;
     }
+
+    /// <summary>A plausible build year, or null (guards against page numbers or document codes read as a year).</summary>
+    public static int? ValidYear(int? year) =>
+        year is >= 1900 && year <= DateTime.UtcNow.Year + 1 ? year : null;
 
     // Azure Search key-safe and deterministic, so re-ingestion updates the same assets.
     private static string Clean(string value) =>

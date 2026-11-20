@@ -3,6 +3,7 @@ using Azure.AI.OpenAI;
 using Azure.Identity;
 using DocDetectives.Application.Ingestion;
 using DocDetectives.Application.Services;
+using DocDetectives.ConsoleApp;
 using DocDetectives.Application.Skills;
 using DocDetectives.Domain.Abstractions;
 using DocDetectives.Infrastructure.Configuration;
@@ -36,6 +37,8 @@ builder.Services.AddHttpClient<IManualExtractor, AzureContentUnderstandingExtrac
 // 2. Register Asset System Gateway & MCP Server Tools
 builder.Services.AddSingleton<IAssetCatalogGateway, AzureAiSearchAssetCatalogGateway>();
 builder.Services.AddSingleton<IJobGateway, AzureAiSearchJobGateway>();
+builder.Services.AddSingleton<IJobPlanGateway, AzureAiSearchJobPlanGateway>();
+builder.Services.AddSingleton<ICharacteristicCatalog, AzureAiSearchCharacteristicCatalog>();
 builder.Services.AddSingleton<AssetSystemMcpTools>();
 
 // 3. Register Microsoft.Extensions.AI Chat & Embedding Clients: OpenAI or Azure OpenAI (Foundry), set by "AiProvider".
@@ -73,7 +76,13 @@ builder.Services.AddSingleton<MarkdownManualChunker>();
 builder.Services.AddSingleton<ManualStructureExtractionSkill>();
 builder.Services.AddSingleton<DocumentClassificationSkill>();
 builder.Services.AddSingleton<InspectionExtractionSkill>();
+builder.Services.AddSingleton<AssetReferenceResolver>();
 builder.Services.AddSingleton<InspectionJobService>();
+builder.Services.AddSingleton<JobPlanExtractionSkill>();
+builder.Services.AddSingleton<JobPlanService>();
+builder.Services.AddSingleton<CharacteristicExtractionSkill>();
+builder.Services.AddSingleton<CharacteristicService>();
+builder.Services.AddSingleton<AssetProposalService>();
 builder.Services.AddSingleton<AssetMatchingSkill>();
 builder.Services.AddSingleton<TechnicalManualQaSkill>();
 builder.Services.AddSingleton<ManualIngestionOrchestrator>();
@@ -120,6 +129,10 @@ switch (mode.ToLowerInvariant())
             manualsFolder,
             options.AutoLinkConfidenceThreshold,
             options.AutoCreateAssets,
+            options.GenerateJobPlans,
+            options.ExtractCharacteristics,
+            options.ReviewNewAssets,
+            options.CreateInspectionJobs,
             options.IngestionParallelism);
         break;
 
@@ -140,11 +153,21 @@ static async Task RunFullIngestionAsync(
     string folderPath,
     double threshold,
     bool autoCreateAssets,
+    bool generateJobPlans,
+    bool extractCharacteristics,
+    bool reviewNewAssets,
+    bool createInspectionJobs,
     int parallelism)
 {
     var orchestrator = services.GetRequiredService<ManualIngestionOrchestrator>();
     var files = orchestrator.GetManualFilesFromFolder(folderPath);
     var consoleLock = new object();
+
+    // Drafted job plans from every document, in file order; reviewed once all documents are processed.
+    var draftsByFile = new System.Collections.Concurrent.ConcurrentDictionary<int, IReadOnlyList<DocDetectives.Domain.Entities.JobPlan>>();
+
+    // Proposed new assets, in file order; reviewed before the job plans.
+    var proposalsByFile = new System.Collections.Concurrent.ConcurrentDictionary<int, AssetProposal>();
 
     Console.WriteLine($"Scanning folder: {Path.GetFullPath(folderPath)}");
     Console.WriteLine($"Found {files.Count} document(s) to process.\n");
@@ -162,16 +185,36 @@ static async Task RunFullIngestionAsync(
                 Console.WriteLine($"[{i + 1}/{files.Count}] Processing '{Path.GetFileName(file)}'...");
             }
 
-            var document = await orchestrator.ProcessDocumentAsync(file, threshold, autoCreateAssets);
+            var document = await orchestrator.ProcessDocumentAsync(
+                file, threshold, autoCreateAssets, generateJobPlans, extractCharacteristics, reviewNewAssets, createInspectionJobs);
+            if (document.JobPlans is { Plans.Count: > 0 } drafted)
+            {
+                draftsByFile[i] = drafted.Plans;
+            }
+
+            if (document.AssetProposal is { } proposal)
+            {
+                proposalsByFile[i] = proposal;
+            }
 
             lock (consoleLock)
             {
                 Console.WriteLine($"[{i + 1}/{files.Count}] {Path.GetFileName(file)}");
                 Console.WriteLine($"  Document Type   : {document.Classification.DocumentType} ({document.Classification.Reason})");
 
-                if (document.Inspection is { } inspection)
+                if (document.Classification.DocumentType == DocDetectives.Domain.Entities.DocumentType.Inspection)
                 {
-                    PrintInspection(document.DocumentId, inspection);
+                    Console.WriteLine($"  Document ID     : {document.DocumentId}");
+                    if (document.Inspection is { } inspection)
+                    {
+                        PrintInspection(document.DocumentId, inspection);
+                    }
+                    else if (document.JobPlans?.AssetResolution is { } resolution)
+                    {
+                        Console.WriteLine($"  Asset Match     : {resolution}");
+                    }
+
+                    PrintJobPlanNote(document.JobPlans);
                     Console.WriteLine();
                     return;
                 }
@@ -182,6 +225,7 @@ static async Task RunFullIngestionAsync(
                 Console.WriteLine($"  Manual ID       : {report.ExtractedManual.ManualId}");
                 Console.WriteLine($"  Manufacturer    : {report.ExtractedManual.Manufacturer ?? "Unknown"}");
                 Console.WriteLine($"  Equipment Name  : {structure?.EquipmentName ?? "Unknown"}");
+                Console.WriteLine($"  Build Year      : {structure?.ManufactureYear?.ToString() ?? "Not found in manual"}");
                 Console.WriteLine($"  Models          : {string.Join(", ", report.ExtractedManual.ModelNumbers)}");
                 Console.WriteLine($"  Category        : {report.ExtractedManual.EquipmentCategory ?? "Unknown"}");
 
@@ -208,11 +252,49 @@ static async Task RunFullIngestionAsync(
 
                 Console.WriteLine($"  Asset Creation  : {report.AssetCreationNote}");
                 PrintAssetTree(report.CreatedAssets);
+                PrintCharacteristics(document.Characteristics);
+                if (document.ManufacturerDetailsNote is { } manufacturerNote)
+                {
+                    Console.WriteLine($"  Asset Details   : {manufacturerNote}");
+                }
+                if (document.AssetProposal is { } pending)
+                {
+                    Console.WriteLine($"  Characteristics : {pending.Characteristics.Count} found; applied when the new asset is approved.");
+                }
+                PrintJobPlanNote(document.JobPlans);
                 Console.WriteLine();
             }
         });
 
     Console.WriteLine("Ingestion and embedding complete.");
+
+    // New assets are created only after a person approves them (optionally after editing).
+    var proposals = proposalsByFile.OrderBy(p => p.Key).Select(p => p.Value).ToList();
+    IReadOnlySet<string> rejectedAssetIds = new HashSet<string>();
+    if (proposals.Count > 0)
+    {
+        Console.WriteLine();
+        var assetReview = await AssetProposalReview.RunAsync(
+            proposals, services.GetRequiredService<AssetProposalService>(), Console.In, Console.Out);
+        rejectedAssetIds = assetReview.RejectedAssetIds;
+    }
+
+    // Job plans are saved only after a person approves them (optionally after editing).
+    // Links to assets that were not created are removed first, so no plan points to a missing asset.
+    var drafts = draftsByFile.OrderBy(d => d.Key).SelectMany(d => d.Value)
+        .Select(plan => plan with
+        {
+            AssetId = plan.AssetId is { } planAsset && rejectedAssetIds.Contains(planAsset) ? null : plan.AssetId,
+            Lines = plan.Lines
+                .Select(line => line.AssetId is { } lineAsset && rejectedAssetIds.Contains(lineAsset) ? line with { AssetId = null } : line)
+                .ToList()
+        })
+        .ToList();
+    if (drafts.Count > 0)
+    {
+        Console.WriteLine();
+        await JobPlanReview.RunAsync(drafts, services.GetRequiredService<JobPlanService>(), Console.In, Console.Out);
+    }
 }
 
 static async Task RunAssetChatAsync(IServiceProvider services, string? assetId)
@@ -278,6 +360,42 @@ static void PrintInspection(string documentId, InspectionProcessingReport report
         {
             Console.WriteLine($"                         {detail}");
         }
+    }
+}
+
+static void PrintCharacteristics(CharacteristicReport? report)
+{
+    if (report is null)
+    {
+        return;
+    }
+
+    Console.WriteLine($"  Characteristics : {report.Note}");
+    foreach (var c in report.Filled)
+    {
+        var value = c.ValueType switch
+        {
+            "Numeric" => $"{c.NumericValue} {c.UnitSymbol ?? c.Unit}".TrimEnd(),
+            "YesNo" => c.BooleanValue == true ? "Yes" : "No",
+            "Date" => c.DateValue,
+            _ => c.TextValue
+        };
+        Console.WriteLine($"                    {c.Name}: {value}  [{c.CharacteristicId}]");
+    }
+}
+
+static void PrintJobPlanNote(JobPlanReport? report)
+{
+    if (report is null)
+    {
+        return;
+    }
+
+    Console.WriteLine($"  Job Plans       : {report.Note}");
+    foreach (var plan in report.Plans)
+    {
+        Console.WriteLine($"                    {plan.Title}  [{plan.Id}]  {plan.Lines.Count} line(s)" +
+                          (plan.Interval is null ? "" : $", interval {plan.Interval}"));
     }
 }
 

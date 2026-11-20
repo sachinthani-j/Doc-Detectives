@@ -5,6 +5,8 @@ public enum MappingStatus
     AutoLinked,
     NeedsReview,
     Created,
+    /// <summary>A new asset is proposed and waits for a person to review it; nothing is created yet.</summary>
+    Proposed,
     Unmatched
 }
 

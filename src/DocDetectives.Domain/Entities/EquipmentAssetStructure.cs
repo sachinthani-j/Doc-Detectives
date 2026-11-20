@@ -1,5 +1,6 @@
 ﻿namespace DocDetectives.Domain.Entities;
 
+/// <param name="ManufactureYear">Year the equipment was built, only when the manual states it; never the document date.</param>
 public sealed record EquipmentAssetStructure(
     string? Manufacturer,
     string? EquipmentName,
@@ -11,7 +12,8 @@ public sealed record EquipmentAssetStructure(
     string? CalibrationAndMaintenance,
     List<SparePartItem> SpareParts,
     List<FaultCodeItem> FaultCodes,
-    List<SubAssetItem> SubAssets);
+    List<SubAssetItem> SubAssets,
+    int? ManufactureYear);
 
 public sealed record TechnicalSpecItem(
     string Parameter,

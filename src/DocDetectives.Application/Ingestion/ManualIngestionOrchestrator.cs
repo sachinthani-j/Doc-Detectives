@@ -13,20 +13,40 @@ public sealed record ManualProcessingReport(
     IReadOnlyList<AssetMappingResult> Mappings,
     int EmbeddedChunkCount,
     string AssetCreationNote,
-    IReadOnlyList<Asset> CreatedAssets);
+    IReadOnlyList<Asset> CreatedAssets,
+    IReadOnlyList<Asset> ProposedAssets);
 
-/// <summary>Result for one uploaded file: exactly one of Manual or Inspection is set, depending on the document type.</summary>
+/// <summary>
+/// A new asset tree waiting for review: nothing is created until a person approves it.
+/// Characteristics are extracted already and applied when the asset is created.
+/// </summary>
+public sealed record AssetProposal(
+    string ManualId,
+    string SourceFileName,
+    IReadOnlyList<Asset> Assets,
+    IReadOnlyList<ExtractedCharacteristic> Characteristics);
+
+/// <summary>
+/// Result for one uploaded file: exactly one of Manual or Inspection is set, depending on the document type.
+/// JobPlans is set when job plan drafting is enabled; Characteristics for manuals with a known asset.
+/// </summary>
 public sealed record DocumentProcessingReport(
     string DocumentId,
     string FileName,
     DocumentClassification Classification,
     ManualProcessingReport? Manual,
-    InspectionProcessingReport? Inspection);
+    InspectionProcessingReport? Inspection,
+    JobPlanReport? JobPlans,
+    CharacteristicReport? Characteristics = null,
+    AssetProposal? AssetProposal = null,
+    string? ManufacturerDetailsNote = null);
 
 public sealed class ManualIngestionOrchestrator(
     IManualExtractor manualExtractor,
     DocumentClassificationSkill classificationSkill,
     InspectionJobService inspectionJobService,
+    JobPlanService jobPlanService,
+    CharacteristicService characteristicService,
     ManualStructureExtractionSkill structureExtractionSkill,
     AssetMatchingSkill matchingSkill,
     IAssetCatalogGateway assetCatalog,
@@ -53,12 +73,16 @@ public sealed class ManualIngestionOrchestrator(
 
     /// <summary>
     /// Reads any uploaded document once, then routes it: manuals are matched to assets and embedded for chat,
-    /// inspection documents become a job on the inspected asset.
+    /// inspection documents become a job on the inspected asset. Both can also produce draft job plans.
     /// </summary>
     public async Task<DocumentProcessingReport> ProcessDocumentAsync(
         string filePath,
         double autoLinkThreshold = 0.85,
         bool autoCreateAssets = true,
+        bool generateJobPlans = true,
+        bool extractCharacteristics = true,
+        bool reviewNewAssets = true,
+        bool createInspectionJobs = false,
         CancellationToken cancellationToken = default)
     {
         // 1. Extract layout-aware Markdown via Azure AI Content Understanding
@@ -73,18 +97,113 @@ public sealed class ManualIngestionOrchestrator(
 
         if (classification.DocumentType == DocumentType.Inspection)
         {
-            var inspection = await inspectionJobService.ProcessAsync(rawDocument, autoLinkThreshold, cancellationToken);
-            return new DocumentProcessingReport(rawDocument.ManualId, rawDocument.FileName, classification, null, inspection);
+            // Jobs are off by default: the checklist becomes a draft job plan, which finds its asset itself.
+            var inspection = createInspectionJobs
+                ? await inspectionJobService.ProcessAsync(rawDocument, autoLinkThreshold, cancellationToken)
+                : null;
+            var inspectionPlans = generateJobPlans
+                ? await jobPlanService.DraftAsync(
+                    rawDocument, DocumentType.Inspection, inspection?.Asset?.Id, autoLinkThreshold, cancellationToken)
+                : null;
+
+            return new DocumentProcessingReport(
+                rawDocument.ManualId, rawDocument.FileName, classification, null, inspection, inspectionPlans);
         }
 
-        var manual = await ProcessManualAsync(rawDocument, autoLinkThreshold, autoCreateAssets, cancellationToken);
-        return new DocumentProcessingReport(rawDocument.ManualId, rawDocument.FileName, classification, manual, null);
+        var manual = await ProcessManualAsync(rawDocument, autoLinkThreshold, autoCreateAssets, reviewNewAssets, cancellationToken);
+
+        // The manual's asset: the one just created or proposed, otherwise the best auto-linked existing asset.
+        // A proposed asset keeps its ID through review, so drafted job plans can already point to it.
+        var manualAssetId = manual.CreatedAssets.FirstOrDefault()?.Id
+                            ?? manual.ProposedAssets.FirstOrDefault()?.Id
+                            ?? manual.Mappings
+                                .Where(m => m.Status == MappingStatus.AutoLinked)
+                                .OrderByDescending(m => m.ConfidenceScore)
+                                .FirstOrDefault()?.AssetId;
+
+        // The enriched manual carries the extracted manufacturer and models onto the plans.
+        var manualPlans = generateJobPlans
+            ? await jobPlanService.DraftAsync(
+                manual.ExtractedManual, DocumentType.Manual, manualAssetId, autoLinkThreshold, cancellationToken)
+            : null;
+
+        // A proposed asset does not exist yet: extract its characteristics now and apply them when it is approved.
+        if (manual.ProposedAssets.Count > 0)
+        {
+            var proposedCharacteristics = extractCharacteristics
+                ? await characteristicService.ExtractAsync(manual.ProposedAssets[0], manual.ExtractedManual, cancellationToken)
+                : [];
+
+            var proposal = new AssetProposal(
+                manual.ExtractedManual.ManualId,
+                manual.ExtractedManual.FileName,
+                manual.ProposedAssets,
+                proposedCharacteristics);
+
+            return new DocumentProcessingReport(
+                rawDocument.ManualId, rawDocument.FileName, classification, manual, null, manualPlans, null, proposal);
+        }
+
+        // Characteristics go straight onto an existing (or just created) asset; only empty ones are filled.
+        var characteristics = extractCharacteristics && manualAssetId is not null
+            ? await characteristicService.FillFromManualAsync(manualAssetId, manual.ExtractedManual, cancellationToken)
+            : null;
+
+        // A matched existing asset gets the manufacturer name and build year from the manual, if it has none yet.
+        var manufacturerNote = manualAssetId is not null && manual.CreatedAssets.Count == 0
+            ? await FillManufacturerDetailsAsync(
+                manualAssetId,
+                manual.ExtractedManual.Manufacturer,
+                AssetTreeBuilder.ValidYear(manual.ExtractedManual.AssetStructure?.ManufactureYear),
+                cancellationToken)
+            : null;
+
+        return new DocumentProcessingReport(
+            rawDocument.ManualId, rawDocument.FileName, classification, manual, null, manualPlans, characteristics,
+            null, manufacturerNote);
+    }
+
+    // Only empty fields are filled; a value already on the asset is never overwritten.
+    private async Task<string> FillManufacturerDetailsAsync(
+        string assetId,
+        string? manufacturerName,
+        int? manufactureYear,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(manufacturerName) && manufactureYear is null)
+        {
+            return "Manufacturer name and build year not found in the manual.";
+        }
+
+        var asset = await assetCatalog.GetAssetByIdAsync(assetId, cancellationToken);
+        if (asset is null)
+        {
+            return $"Skipped: asset '{assetId}' not found.";
+        }
+
+        var setName = string.IsNullOrWhiteSpace(asset.ManufacturerName) && !string.IsNullOrWhiteSpace(manufacturerName)
+            ? manufacturerName.Trim()
+            : null;
+        var setYear = asset.ManufactureYear is null ? manufactureYear : null;
+
+        if (setName is null && setYear is null)
+        {
+            return $"Kept existing values (manufacturer name: {asset.ManufacturerName ?? "-"}, year: {asset.ManufactureYear?.ToString() ?? "-"}).";
+        }
+
+        await assetCatalog.UpdateManufacturerDetailsAsync(assetId, setName, setYear, cancellationToken);
+        return string.Join(", ", new[]
+        {
+            setName is null ? null : $"set manufacturer name '{setName}'",
+            setYear is null ? null : $"set build year {setYear}"
+        }.OfType<string>()) + $" on asset '{assetId}'.";
     }
 
     private async Task<ManualProcessingReport> ProcessManualAsync(
         ExtractedManual rawManual,
         double autoLinkThreshold,
         bool autoCreateAssets,
+        bool reviewNewAssets,
         CancellationToken cancellationToken)
     {
 
@@ -109,6 +228,7 @@ public sealed class ManualIngestionOrchestrator(
         //     The new root asset comes with its sub-asset hierarchy and spare parts (bill of materials).
         var newAssets = AssetTreeBuilder.Build(structure, enrichedManual.Manufacturer, out var missingInfo);
         IReadOnlyList<Asset> createdAssets = [];
+        IReadOnlyList<Asset> proposedAssets = [];
         string assetCreationNote;
 
         if (mappings.Any(m => m.Status == MappingStatus.AutoLinked))
@@ -128,6 +248,25 @@ public sealed class ManualIngestionOrchestrator(
         else if (newAssets is null)
         {
             assetCreationNote = $"Skipped: the manual has no {missingInfo}.";
+        }
+        else if (reviewNewAssets)
+        {
+            // Nothing is created yet: the asset tree is shown for review after all documents are processed.
+            proposedAssets = newAssets;
+            var root = newAssets[0];
+            assetCreationNote =
+                $"Proposed new asset '{root.Id}' with {newAssets.Count - 1} sub-asset(s) and " +
+                $"{newAssets.Sum(a => a.SpareParts?.Count ?? 0)} spare part(s); waiting for review.";
+
+            mappings =
+            [
+                new AssetMappingResult(
+                    AssetId: root.Id,
+                    ManualId: enrichedManual.ManualId,
+                    ConfidenceScore: 1.0,
+                    Reasoning: $"No existing asset matched; proposed '{root.Name}' from the manual.",
+                    Status: MappingStatus.Proposed)
+            ];
         }
         else
         {
@@ -150,10 +289,12 @@ public sealed class ManualIngestionOrchestrator(
         }
 
         // Sub-assets are linked too, so chat scoped to e.g. the pump still finds this manual.
+        // Proposed asset IDs are included: they stay the same through review.
         var linkedAssetIds = mappings
-            .Where(m => m.Status is MappingStatus.AutoLinked or MappingStatus.Created)
+            .Where(m => m.Status is MappingStatus.AutoLinked or MappingStatus.Created or MappingStatus.Proposed)
             .Select(m => m.AssetId)
             .Concat(createdAssets.Select(a => a.Id))
+            .Concat(proposedAssets.Select(a => a.Id))
             .Distinct()
             .ToList();
 
@@ -184,7 +325,8 @@ public sealed class ManualIngestionOrchestrator(
         _ = knowledgeIndex;
         // await knowledgeIndex.UpsertChunksAsync(vectorizedChunks, cancellationToken);
 
-        return new ManualProcessingReport(enrichedManual, mappings, vectorizedChunks.Count, assetCreationNote, createdAssets);
+        return new ManualProcessingReport(
+            enrichedManual, mappings, vectorizedChunks.Count, assetCreationNote, createdAssets, proposedAssets);
     }
 
     // The embedding model accepts at most 8192 tokens per input. Technical text (part numbers, tables)
