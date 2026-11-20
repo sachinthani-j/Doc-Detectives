@@ -1,8 +1,8 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/DocDetectives.Application/DocDetectives.Application.csproj" />
-    <Project Path="src/DocDetectives.Console/DocDetectives.Console.csproj" />
     <Project Path="src/DocDetectives.Domain/DocDetectives.Domain.csproj" />
     <Project Path="src/DocDetectives.Infrastructure/DocDetectives.Infrastructure.csproj" />
+    <Project Path="src/DocDetectives.Web/DocDetectives.Web.csproj" />
   </Folder>
 </Solution>

@@ -1,0 +1,510 @@
+@page "/ingest"
+@implements IDisposable
+@inject IngestionJobService Jobs
+
+<PageTitle>Ingest manuals · Doc Detectives</PageTitle>
+
+<div class="page">
+    <div class="page-head">
+        <div>
+            <div class="eyebrow">Pipeline</div>
+            <h1>Ingest manuals</h1>
+            <p class="muted">Each manual is read, its specs and parts are extracted, it's matched to assets, and its sections are indexed for Q&amp;A.</p>
+        </div>
+    </div>
+
+    <div class="grid-2" style="margin-bottom:1.5rem;align-items:start">
+        <div class="stack">
+            <div class="dropzone @(_dragging ? "dragging" : null)">
+                <InputFile OnChange="OnFilesSelectedAsync" multiple accept=".pdf,.docx,.doc,.png,.jpg,.jpeg,.tiff"
+                           @ondragenter="@(() => _dragging = true)" @ondragleave="@(() => _dragging = false)" @ondrop="@(() => _dragging = false)" />
+                <div class="icon-tile"><Icon Name="upload" Size="22" /></div>
+                <h3>Drop manuals here, or click to browse</h3>
+                <p class="subtle" style="margin-top:.3rem">PDF, Word or scanned images · up to @MaxFileMb MB each</p>
+            </div>
+
+            @if (_uploading)
+            {
+                <div class="alert alert-info"><span class="spinner"></span> <div>Uploading…</div></div>
+            }
+            @foreach (var msg in _uploadErrors)
+            {
+                <div class="alert alert-danger"><Icon Name="alert" /> <div>@msg</div></div>
+            }
+        </div>
+
+        <div class="card">
+            <div class="card-head">
+                <div>
+                    <h2>Manuals folder</h2>
+                    <div class="subtle truncate" title="@Jobs.ManualsFolder">@Jobs.ManualsFolder</div>
+                </div>
+                @if (_files.Count > 1)
+                {
+                    <button class="btn btn-sm" @onclick="IngestAll">Ingest all</button>
+                }
+            </div>
+            @if (_files.Count == 0)
+            {
+                <div class="empty" style="padding:2rem 1rem">
+                    <p>No manuals in this folder yet.</p>
+                </div>
+            }
+            else
+            {
+                <div class="file-list" style="max-height:260px;overflow-y:auto">
+                    @foreach (var f in _files)
+                    {
+                        var busy = Jobs.IsQueuedOrRunning(f.FullName);
+                        <div class="file-row">
+                            <span class="file-icon">@f.Extension.TrimStart('.').ToUpperInvariant()</span>
+                            <div class="grow">
+                                <div class="truncate" style="font-weight:550" title="@f.Name">@f.Name</div>
+                                <div class="subtle">@UiText.Size(f.Length)</div>
+                            </div>
+                            <button class="btn btn-sm" disabled="@busy" @onclick="@(() => Jobs.Enqueue(f.FullName))">
+                                @(busy ? "Queued" : "Ingest")
+                            </button>
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+    </div>
+
+    <div class="row" style="justify-content:space-between;margin-bottom:.75rem">
+        <h2>Jobs</h2>
+        <span class="subtle">Kept until the app restarts</span>
+    </div>
+
+    @if (_jobs.Count == 0)
+    {
+        <div class="card">
+            <div class="empty">
+                <div class="icon-wrap"><Icon Name="file" /></div>
+                <h3>Nothing processed yet</h3>
+                <p>Upload a manual or pick one from the folder to start.</p>
+            </div>
+        </div>
+    }
+
+    <div class="stack">
+        @foreach (var job in _jobs)
+        {
+            var status = UiText.Status(job.Status);
+            var open = IsOpen(job);
+            <div class="job">
+                <div class="job-head">
+                    <span class="file-icon">@Path.GetExtension(job.FileName).TrimStart('.').ToUpperInvariant()</span>
+                    <div class="grow">
+                        <div class="truncate" style="font-weight:600">@job.FileName</div>
+                        <div class="subtle">
+                            @if (job.Status == IngestionJobStatus.Running && job.Stage is { } currentStage)
+                            {
+                                <span>@UiText.Label(currentStage) · </span>
+                            }
+                            @(job.StartedAt is null ? $"Queued {job.QueuedAt:HH:mm}" : $"Started {job.StartedAt:HH:mm}") @(job.Duration is null ? "" : $"· {UiText.Duration(job.Duration)}")
+                        </div>
+                    </div>
+                    @if (job.NeedsReview)
+                    {
+                        <span class="badge badge-warn">Needs review</span>
+                    }
+                    @if (job.Document is { } doc)
+                    {
+                        <span class="badge" title="@doc.Classification.Reason">
+                            @(doc.Classification.DocumentType == DocumentType.Inspection ? "Inspection" : "Manual")
+                        </span>
+                    }
+                    <span class="@status.Css">
+                        @if (job.Status == IngestionJobStatus.Running) { <span class="spinner" style="width:10px;height:10px"></span> }
+                        @status.Text
+                    </span>
+                    @if (job.Status is IngestionJobStatus.Succeeded or IngestionJobStatus.Failed)
+                    {
+                        <button class="btn btn-ghost btn-sm" @onclick="@(() => Toggle(job))">@(open ? "Hide" : "Details")</button>
+                    }
+                </div>
+
+                @if (job.Status is IngestionJobStatus.Queued or IngestionJobStatus.Running || job.Status == IngestionJobStatus.Failed)
+                {
+                    <div class="steps">
+                        @foreach (var stage in UiText.Stages)
+                        {
+                            <div class="step @StepClass(job, stage)">
+                                <div class="bar"></div>
+                                <div class="label">@UiText.Label(stage)</div>
+                            </div>
+                        }
+                    </div>
+                }
+
+                @if (open && job.Status == IngestionJobStatus.Failed)
+                {
+                    <div class="job-body">
+                        <div class="alert alert-danger"><Icon Name="alert" /> <div>@job.Error</div></div>
+                        <div><button class="btn btn-sm" @onclick="@(() => Jobs.Enqueue(job.FilePath))">Retry</button></div>
+                    </div>
+                }
+
+                @if (open && job.Inspection is { } insp)
+                {
+                    var d = insp.Inspection;
+                    <div class="job-body">
+                        <dl class="facts" style="margin:0">
+                            <Fact Label="Inspection" Value="@d.Title" />
+                            <Fact Label="Date" Value="@d.InspectionDate" />
+                            <Fact Label="Inspector" Value="@d.Inspector" />
+                            <Fact Label="Asset in document" Value="@string.Join(" · ", new[] { d.AssetId, d.AssetName, d.SerialNumber }.Where(x => !string.IsNullOrWhiteSpace(x)))" />
+                        </dl>
+
+                        <div class="stack-sm">
+                            <h3>Matched asset</h3>
+                            @if (insp.Asset is { } a)
+                            {
+                                <div class="match">
+                                    <span style="color:var(--accent-text)"><Icon Name="box" /></span>
+                                    <div class="grow">
+                                        <a href="@UiText.AssetUrl(a.Id)" style="font-weight:600">@a.Name</a>
+                                        <div class="subtle"><span class="mono">@a.Id</span> · @insp.AssetResolution</div>
+                                    </div>
+                                </div>
+                            }
+                            else
+                            {
+                                <p class="subtle">@insp.AssetResolution</p>
+                            }
+                        </div>
+
+                        <div class="stack-sm">
+                            <div class="row" style="justify-content:space-between">
+                                <h3>Job</h3>
+                                @if (insp.Job is { } j) { <span class="badge @(j.Status == JobStatus.Completed ? "badge-ok" : "badge-info")">@j.Status</span> }
+                            </div>
+                            <p class="subtle">@insp.JobNote</p>
+                            @if (insp.Job is { Lines.Count: > 0 } job2)
+                            {
+                                <div class="table-wrap card">
+                                    <table class="table">
+                                        <thead><tr><th>#</th><th>Check</th><th class="hide-sm">Equipment</th><th>Result</th><th class="hide-sm">Measurement / remarks</th></tr></thead>
+                                        <tbody>
+                                            @foreach (var line in job2.Lines)
+                                            {
+                                                <tr>
+                                                    <td class="subtle">@line.LineNumber</td>
+                                                    <td>
+                                                        <div>@line.Description</div>
+                                                        @if (line.Criteria is not null) { <div class="subtle">@line.Criteria</div> }
+                                                    </td>
+                                                    <td class="hide-sm"><a class="mono" href="@UiText.AssetUrl(line.AssetId)">@(line.Component ?? line.AssetId)</a></td>
+                                                    <td>@(line.Result ?? "—")</td>
+                                                    <td class="hide-sm subtle">@string.Join(" · ", new[] { line.Measurement, line.Remarks }.Where(x => !string.IsNullOrWhiteSpace(x)))</td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                </div>
+                            }
+                        </div>
+                    </div>
+                }
+
+                @if (open && job.Report is { } report)
+                {
+                    var manual = report.ExtractedManual;
+                    var s = manual.AssetStructure;
+                    <div class="job-body">
+                        <dl class="facts" style="margin:0">
+                            <Fact Label="Manufacturer" Value="@manual.Manufacturer" />
+                            <Fact Label="Equipment" Value="@s?.EquipmentName" />
+                            <Fact Label="Models" Value="@string.Join(", ", manual.ModelNumbers)" />
+                            <Fact Label="Category" Value="@manual.EquipmentCategory" />
+                            <Fact Label="Document code" Value="@s?.DocumentCode" Mono="true" />
+                            <Fact Label="Manual ID" Value="@manual.ManualId" Mono="true" />
+                        </dl>
+
+                        <div class="stack-sm">
+                            <div class="stat-row">
+                                @foreach (var tile in Tiles(s))
+                                {
+                                    var active = SelectedTile(job) == tile.Key;
+                                    <button type="button" class="stat stat-btn @(active ? "active" : null)"
+                                            disabled="@(tile.Count == 0)" aria-expanded="@(active ? "true" : "false")"
+                                            @onclick="@(() => ToggleTile(job, tile.Key))">
+                                        <div class="num">@tile.Count</div>
+                                        <div class="lbl">
+                                            @tile.Label
+                                            @if (tile.Count > 0) { <span class="chev">@(active ? "▴" : "▾")</span> }
+                                        </div>
+                                    </button>
+                                }
+                            </div>
+                            <p class="subtle">@report.EmbeddedChunkCount sections indexed for Q&amp;A</p>
+
+                            @if (s is not null)
+                            {
+                                switch (SelectedTile(job))
+                                {
+                                    case "specs":
+                                        <div class="detail-panel card table-wrap">
+                                            <table class="table">
+                                                <thead><tr><th>Parameter</th><th>Value</th></tr></thead>
+                                                <tbody>
+                                                    @foreach (var spec in s.TechnicalSpecifications)
+                                                    {
+                                                        <tr><td class="asset-name">@spec.Parameter</td><td>@spec.Value</td></tr>
+                                                    }
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                        break;
+
+                                    case "parts":
+                                        <div class="detail-panel card table-wrap">
+                                            <table class="table">
+                                                <thead><tr><th>Article number</th><th>Part</th><th class="hide-sm">Belongs to</th></tr></thead>
+                                                <tbody>
+                                                    @foreach (var part in s.SpareParts)
+                                                    {
+                                                        <tr>
+                                                            <td class="mono nowrap">@part.ArticleNumber</td>
+                                                            <td class="asset-name">@part.PartName</td>
+                                                            <td class="hide-sm">@(part.BelongsTo ?? (s.EquipmentName ?? "Whole equipment"))</td>
+                                                        </tr>
+                                                    }
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                        break;
+
+                                    case "faults":
+                                        <div class="detail-panel card table-wrap">
+                                            <table class="table">
+                                                <thead><tr><th>Code / symptom</th><th>Cause</th><th>Resolution</th></tr></thead>
+                                                <tbody>
+                                                    @foreach (var fault in s.FaultCodes)
+                                                    {
+                                                        <tr>
+                                                            <td class="asset-name">@fault.CodeOrSymptom</td>
+                                                            <td>@fault.Cause</td>
+                                                            <td>@fault.Resolution</td>
+                                                        </tr>
+                                                    }
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                        break;
+
+                                    case "safety":
+                                        <div class="detail-panel card card-body">
+                                            <ul class="warning-list">
+                                                @foreach (var warning in s.SafetyWarnings)
+                                                {
+                                                    <li><span class="warn-icon"><Icon Name="alert" Size="15" /></span><span>@warning</span></li>
+                                                }
+                                            </ul>
+                                        </div>
+                                        break;
+                                }
+                            }
+                        </div>
+
+                        <div class="stack-sm">
+                            <h3>Asset matches</h3>
+                            @if (report.Mappings.Count == 0)
+                            {
+                                <p class="subtle">No asset matched this manual.</p>
+                            }
+                            @foreach (var m in report.Mappings.OrderByDescending(m => m.ConfidenceScore))
+                            {
+                                var approved = job.ApprovedAssetIds.ContainsKey(m.AssetId);
+                                var badge = approved ? ("Linked", "badge badge-ok") : UiText.Mapping(m.Status);
+                                <div class="match">
+                                    <div class="score">
+                                        <div class="pct">@((int)Math.Round(m.ConfidenceScore * 100))%</div>
+                                        <div class="meter"><span style="width:@((int)Math.Round(m.ConfidenceScore * 100))%"></span></div>
+                                    </div>
+                                    <div class="grow">
+                                        <div class="row wrap" style="gap:.5rem">
+                                            <a class="mono" href="@UiText.AssetUrl(m.AssetId)">@m.AssetId</a>
+                                            <span class="@badge.Item2">@badge.Item1</span>
+                                        </div>
+                                        <div class="subtle" style="margin-top:.2rem">@m.Reasoning</div>
+                                    </div>
+                                    @if (m.Status == MappingStatus.NeedsReview && !approved)
+                                    {
+                                        <button class="btn btn-sm" disabled="@_approving.Contains(Key(job, m))" @onclick="@(() => ApproveAsync(job, m))">
+                                            @if (_approving.Contains(Key(job, m))) { <span class="spinner"></span> } else { <Icon Name="link" Size="14" /> }
+                                            Link
+                                        </button>
+                                    }
+                                </div>
+                            }
+                            @if (!string.IsNullOrWhiteSpace(report.AssetCreationNote))
+                            {
+                                <p class="subtle">Asset creation: @report.AssetCreationNote</p>
+                            }
+                        </div>
+
+                        @if (report.CreatedAssets.Count > 0)
+                        {
+                            <div class="stack-sm">
+                                <h3>New asset hierarchy</h3>
+                                <AssetTree Items="report.CreatedAssets" />
+                            </div>
+                        }
+
+                        @if (_approveError is not null)
+                        {
+                            <div class="alert alert-danger"><Icon Name="alert" /> <div>@_approveError</div></div>
+                        }
+
+                        @if (report.Mappings.FirstOrDefault(m => m.Status is MappingStatus.AutoLinked or MappingStatus.Created) is { } linked)
+                        {
+                            <div><a class="btn btn-sm btn-primary" href="@UiText.AskUrl(linked.AssetId)"><Icon Name="chat" Size="14" /> Ask about @linked.AssetId</a></div>
+                        }
+                    </div>
+                }
+
+                @if (open && job.Document is { } reviewDoc
+                     && (reviewDoc.AssetProposal is not null || reviewDoc.JobPlans is not null || reviewDoc.Characteristics is not null || reviewDoc.ManufacturerDetailsNote is not null))
+                {
+                    <div class="job-body">
+                        <ReviewPanel Job="job" />
+                    </div>
+                }
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    private const int MaxFileMb = 100;
+
+    private List<IngestionJob> _jobs = [];
+    private IReadOnlyList<FileInfo> _files = [];
+    private readonly Dictionary<Guid, bool> _open = new();
+    private readonly Dictionary<Guid, string> _selectedTile = new();
+
+    private static (string Key, string Label, int Count)[] Tiles(EquipmentAssetStructure? s) =>
+    [
+        ("specs", "Specifications", s?.TechnicalSpecifications.Count ?? 0),
+        ("parts", "Spare parts", s?.SpareParts.Count ?? 0),
+        ("faults", "Fault codes", s?.FaultCodes.Count ?? 0),
+        ("safety", "Safety warnings", s?.SafetyWarnings.Count ?? 0)
+    ];
+
+    private string? SelectedTile(IngestionJob job) => _selectedTile.GetValueOrDefault(job.Id);
+
+    // Clicking the open tile closes it; clicking another tile switches to it.
+    private void ToggleTile(IngestionJob job, string key)
+    {
+        if (SelectedTile(job) == key) _selectedTile.Remove(job.Id);
+        else _selectedTile[job.Id] = key;
+    }
+    private readonly HashSet<string> _approving = [];
+    private readonly List<string> _uploadErrors = [];
+    private string? _approveError;
+    private bool _uploading;
+    private bool _dragging;
+
+    protected override void OnInitialized()
+    {
+        Jobs.Changed += OnJobsChanged;
+        Refresh();
+    }
+
+    private void Refresh()
+    {
+        _jobs = Jobs.Jobs.ToList();
+        _files = Jobs.GetManualFiles();
+    }
+
+    private void OnJobsChanged() => _ = InvokeAsync(() =>
+    {
+        Refresh();
+        StateHasChanged();
+    });
+
+    // Finished jobs open by default only for the most recent one.
+    private bool IsOpen(IngestionJob job) =>
+        _open.TryGetValue(job.Id, out var open)
+            ? open
+            : job.Status is IngestionJobStatus.Succeeded or IngestionJobStatus.Failed
+              && _jobs.FirstOrDefault(j => j.Status is IngestionJobStatus.Succeeded or IngestionJobStatus.Failed) == job;
+
+    private void Toggle(IngestionJob job) => _open[job.Id] = !IsOpen(job);
+
+    private static string StepClass(IngestionJob job, IngestionStage stage)
+    {
+        if (job.Stage is not { } current) return "";
+        if (job.Status == IngestionJobStatus.Failed && current == stage) return "failed";
+        if (stage < current || current == IngestionStage.Completed) return "done";
+        return stage == current && job.Status == IngestionJobStatus.Running ? "active" : "";
+    }
+
+    private async Task OnFilesSelectedAsync(InputFileChangeEventArgs e)
+    {
+        _dragging = false;
+        _uploadErrors.Clear();
+        _uploading = true;
+
+        foreach (var file in e.GetMultipleFiles(20))
+        {
+            if (!IngestionJobService.IsSupported(file.Name))
+            {
+                _uploadErrors.Add($"{file.Name}: unsupported file type.");
+                continue;
+            }
+
+            try
+            {
+                await using var stream = file.OpenReadStream(MaxFileMb * 1024L * 1024L);
+                var path = await Jobs.SaveUploadAsync(stream, file.Name, CancellationToken.None);
+                Jobs.Enqueue(path);
+            }
+            catch (IOException ex) when (ex.Message.Contains("exceeds", StringComparison.OrdinalIgnoreCase))
+            {
+                _uploadErrors.Add($"{file.Name}: larger than {MaxFileMb} MB.");
+            }
+            catch (Exception ex)
+            {
+                _uploadErrors.Add($"{file.Name}: {ex.Message}");
+            }
+        }
+
+        _uploading = false;
+        Refresh();
+    }
+
+    private void IngestAll()
+    {
+        foreach (var f in _files.Where(f => !Jobs.IsQueuedOrRunning(f.FullName)))
+        {
+            Jobs.Enqueue(f.FullName);
+        }
+    }
+
+    private static string Key(IngestionJob job, AssetMappingResult m) => $"{job.Id}:{m.AssetId}";
+
+    private async Task ApproveAsync(IngestionJob job, AssetMappingResult mapping)
+    {
+        var key = Key(job, mapping);
+        _approving.Add(key);
+        _approveError = null;
+        try
+        {
+            await Jobs.ApproveMatchAsync(job, mapping);
+        }
+        catch (Exception ex)
+        {
+            _approveError = $"Could not link {mapping.AssetId}: {ex.Message}";
+        }
+        finally
+        {
+            _approving.Remove(key);
+        }
+    }
+
+    public void Dispose() => Jobs.Changed -= OnJobsChanged;
+}

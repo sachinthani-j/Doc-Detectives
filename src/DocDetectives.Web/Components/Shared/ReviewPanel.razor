@@ -1,0 +1,216 @@
+@* Review step for one processed document: approve or reject the proposed new assets, then each drafted job plan.
+   Mirrors the console's AssetProposalReview / JobPlanReview (without editing). Nothing is written until approved. *@
+@inject IngestionJobService Jobs
+
+@if (Doc is null) { return; }
+
+@if (Doc.Characteristics is { } chars)
+{
+    <div class="stack-sm">
+        <h3>Characteristics</h3>
+        <p class="subtle">@chars.Note</p>
+        @if (chars.Filled.Count > 0)
+        {
+            <div class="char-grid">
+                @foreach (var c in chars.Filled)
+                {
+                    <div class="char"><span class="char-name">@c.Name</span><span class="char-val">@Format(c)</span></div>
+                }
+            </div>
+        }
+    </div>
+}
+
+@if (!string.IsNullOrWhiteSpace(Doc.ManufacturerDetailsNote))
+{
+    <p class="subtle">Asset details: @Doc.ManufacturerDetailsNote</p>
+}
+
+@if (Doc.AssetProposal is { } proposal)
+{
+    var decision = Job.AssetProposalDecision;
+    <div class="review-card @(decision == ReviewDecision.Pending ? "pending" : null)">
+        <div class="review-head">
+            <div class="grow">
+                <h3>New asset proposal</h3>
+                <p class="subtle">
+                    Nothing is created until you approve. @proposal.Assets.Count asset(s),
+                    @proposal.Assets.Sum(a => a.SpareParts?.Count ?? 0) spare part(s),
+                    @proposal.Characteristics.Count characteristic(s).
+                </p>
+            </div>
+            <DecisionBadge Decision="decision" />
+        </div>
+
+        <AssetTree Items="decision == ReviewDecision.Approved && Job.ApprovedProposalAssets.Count > 0 ? Job.ApprovedProposalAssets : proposal.Assets" />
+
+        @if (proposal.Characteristics.Count > 0)
+        {
+            <div class="char-grid">
+                @foreach (var c in proposal.Characteristics)
+                {
+                    <div class="char" title="@c.SourceText"><span class="char-name">@c.Name</span><span class="char-val">@Format(c)</span></div>
+                }
+            </div>
+        }
+
+        @if (decision == ReviewDecision.Pending)
+        {
+            <div class="row">
+                <button class="btn btn-primary btn-sm" disabled="@_busy" @onclick="ApproveProposalAsync">
+                    @if (_busy) { <span class="spinner"></span> } else { <Icon Name="check" Size="14" /> } Approve &amp; create
+                </button>
+                <button class="btn btn-sm" disabled="@_busy" @onclick="@(() => Jobs.RejectAssetProposal(Job))"><Icon Name="x" Size="14" /> Reject</button>
+            </div>
+        }
+    </div>
+}
+
+@if (Doc.JobPlans is { } plans)
+{
+    <div class="stack-sm">
+        <h3>Job plans</h3>
+        <p class="subtle">@plans.Note</p>
+        @if (plans.Plans.Count > 0 && !IngestionJobService.CanReviewPlans(Job))
+        {
+            <div class="alert alert-info"><Icon Name="alert" /> <div>Decide on the new asset proposal first, so plans only link to assets that exist.</div></div>
+        }
+
+        @foreach (var plan in plans.Plans)
+        {
+            var decision = Job.PlanDecision(plan);
+            var expanded = _expandedPlans.Contains(plan.Id);
+            <div class="review-card @(decision == ReviewDecision.Pending ? "pending" : null)">
+                <div class="review-head">
+                    <div class="grow">
+                        <div style="font-weight:600">@plan.Title</div>
+                        <div class="subtle">
+                            @plan.Lines.Count line(s)
+                            @if (!string.IsNullOrWhiteSpace(plan.Interval)) { <span> · every @plan.Interval</span> }
+                            @if (plan.AssetId is not null) { <span> · asset <a class="mono" href="@UiText.AssetUrl(plan.AssetId)">@plan.AssetId</a></span> }
+                        </div>
+                    </div>
+                    <DecisionBadge Decision="decision" />
+                    <button class="btn btn-ghost btn-sm" @onclick="@(() => TogglePlan(plan.Id))">@(expanded ? "Hide" : "Show lines")</button>
+                </div>
+
+                @if (expanded)
+                {
+                    @if (plan.Materials.Count > 0)
+                    {
+                        <p class="subtle"><strong>Materials:</strong> @string.Join(", ", plan.Materials)</p>
+                    }
+                    @if (plan.SafetyNotes.Count > 0)
+                    {
+                        <ul class="warning-list">
+                            @foreach (var note in plan.SafetyNotes)
+                            {
+                                <li><span class="warn-icon"><Icon Name="alert" Size="15" /></span><span>@note</span></li>
+                            }
+                        </ul>
+                    }
+                    <div class="card table-wrap detail-panel">
+                        <table class="table">
+                            <thead><tr><th>#</th><th>Line</th><th>Type</th><th class="hide-sm">Equipment</th><th class="hide-sm">Record</th></tr></thead>
+                            <tbody>
+                                @foreach (var line in plan.Lines)
+                                {
+                                    <tr>
+                                        <td class="subtle">@line.LineNumber</td>
+                                        <td>
+                                            <div class="asset-name">@line.Title</div>
+                                            @if (!string.IsNullOrWhiteSpace(line.Instruction)) { <div class="subtle">@line.Instruction</div> }
+                                        </td>
+                                        <td><span class="badge @(line.LineType == JobPlanLineType.Inspection ? "badge-info" : null)">@line.LineType</span></td>
+                                        <td class="hide-sm">
+                                            @if (line.AssetId is not null) { <a class="mono" href="@UiText.AssetUrl(line.AssetId)">@(line.Component ?? line.AssetId)</a> }
+                                            else { <span class="subtle">@(line.Component ?? "—")</span> }
+                                        </td>
+                                        <td class="hide-sm subtle">
+                                            @string.Join(" · ", new[] { line.MeasurementPoint, line.NominalValue, line.AllowedResults.Count > 0 ? string.Join(" / ", line.AllowedResults) : null }.Where(x => !string.IsNullOrWhiteSpace(x)))
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+
+                @if (decision == ReviewDecision.Pending)
+                {
+                    @if (_storedStatus.GetValueOrDefault(plan.Id) is { } stored)
+                    {
+                        <p class="subtle">A plan with this ID is already saved (@stored); approving replaces it.</p>
+                    }
+                    <div class="row">
+                        <button class="btn btn-primary btn-sm" disabled="@(_busy || !IngestionJobService.CanReviewPlans(Job))" @onclick="@(() => ApprovePlanAsync(plan))">
+                            <Icon Name="check" Size="14" /> Approve &amp; save
+                        </button>
+                        <button class="btn btn-sm" disabled="@(_busy || !IngestionJobService.CanReviewPlans(Job))" @onclick="@(() => Jobs.RejectJobPlan(Job, plan))">
+                            <Icon Name="x" Size="14" /> Reject
+                        </button>
+                    </div>
+                }
+            </div>
+        }
+    </div>
+}
+
+@if (_error is not null)
+{
+    <div class="alert alert-danger"><Icon Name="alert" /> <div>@_error</div></div>
+}
+
+@code {
+    [Parameter, EditorRequired] public IngestionJob Job { get; set; } = default!;
+
+    private DocumentProcessingReport? Doc => Job.Document;
+    private readonly HashSet<string> _expandedPlans = [];
+    private readonly Dictionary<string, string?> _storedStatus = new();
+    private bool _busy;
+    private string? _error;
+    private Guid _loadedFor;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        // Warn up front when approving a plan would replace one saved earlier (e.g. the same manual ingested before).
+        if (_loadedFor == Job.Id || Doc?.JobPlans is not { Plans.Count: > 0 } plans) return;
+        _loadedFor = Job.Id;
+
+        foreach (var plan in plans.Plans)
+        {
+            try { _storedStatus[plan.Id] = await Jobs.GetStoredPlanStatusAsync(plan); }
+            catch { /* index not created yet: nothing stored */ }
+        }
+    }
+
+    private void TogglePlan(string id)
+    {
+        if (!_expandedPlans.Remove(id)) _expandedPlans.Add(id);
+    }
+
+    private async Task ApproveProposalAsync() => await RunAsync(() => Jobs.ApproveAssetProposalAsync(Job), "create the assets");
+
+    private async Task ApprovePlanAsync(JobPlan plan) => await RunAsync(() => Jobs.ApproveJobPlanAsync(Job, plan), $"save '{plan.Title}'");
+
+    private async Task RunAsync(Func<Task> action, string what)
+    {
+        _busy = true;
+        _error = null;
+        try { await action(); }
+        catch (Exception ex) { _error = $"Could not {what}: {ex.Message}"; }
+        finally { _busy = false; }
+    }
+
+    private static string Format(AssetCharacteristic c) =>
+        FormatValue(c.NumericValue, c.BooleanValue, c.TextValue, c.DateValue, c.UnitSymbol ?? c.Unit);
+
+    private static string Format(ExtractedCharacteristic c) =>
+        FormatValue(c.NumericValue, c.BooleanValue, c.TextValue, c.DateValue, c.UnitSymbol ?? c.Unit);
+
+    private static string FormatValue(double? number, bool? flag, string? text, string? date, string? unit) =>
+        number is { } n ? $"{n:0.###} {unit}".Trim()
+        : flag is { } b ? (b ? "Yes" : "No")
+        : !string.IsNullOrWhiteSpace(text) ? text
+        : date ?? "—";
+}

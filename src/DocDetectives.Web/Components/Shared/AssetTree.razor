@@ -1,0 +1,59 @@
+@* Renders an asset hierarchy (root, sub-assets, spare parts) from a flat list linked by ParentAssetId. *@
+<ul class="tree @(Nested ? "nested" : null)">
+    @foreach (var asset in Roots)
+    {
+        var children = Items.Where(a => a.ParentAssetId == asset.Id).ToList();
+        <li>
+            <div class="tree-node">
+                <span class="tree-icon"><Icon Name="box" Size="14" /></span>
+                <a href="@UiText.AssetUrl(asset.Id)" class="tree-name">@asset.Name</a>
+                <span class="tag">@asset.Id</span>
+                @if (asset.SpareParts is { Count: > 0 } parts)
+                {
+                    <span class="subtle">· @parts.Count spare part@(parts.Count == 1 ? "" : "s")</span>
+                }
+            </div>
+
+            @if (asset.SpareParts is { Count: > 0 } spareParts)
+            {
+                <ul class="parts">
+                    @foreach (var part in spareParts)
+                    {
+                        var (article, name) = SplitPart(part);
+                        <li>
+                            <span class="mono">@article</span>
+                            @if (name is not null) { <span>@name</span> }
+                        </li>
+                    }
+                </ul>
+            }
+
+            @if (children.Count > 0)
+            {
+                <AssetTree Items="Items" ParentId="@asset.Id" Nested="true" />
+            }
+        </li>
+    }
+</ul>
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<Asset> Items { get; set; } = [];
+
+    /// <summary>Render the children of this asset; when null, render assets whose parent is not in the list.</summary>
+    [Parameter] public string? ParentId { get; set; }
+
+    [Parameter] public bool Nested { get; set; }
+
+    private IEnumerable<Asset> Roots => ParentId is null
+        ? Items.Where(a => a.ParentAssetId is null || Items.All(p => p.Id != a.ParentAssetId))
+        : Items.Where(a => a.ParentAssetId == ParentId);
+
+    // Spare parts are stored as "ArticleNumber | PartName".
+    private static (string Article, string? Name) SplitPart(string part)
+    {
+        var index = part.IndexOf('|');
+        return index < 0
+            ? (part.Trim(), null)
+            : (part[..index].Trim(), part[(index + 1)..].Trim());
+    }
+}

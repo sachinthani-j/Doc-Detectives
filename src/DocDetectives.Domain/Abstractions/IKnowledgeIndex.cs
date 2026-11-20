@@ -8,10 +8,19 @@ public interface IKnowledgeIndex
         IReadOnlyList<ManualChunk> chunks,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Hybrid search over manual chunks. When <paramref name="assetId"/> is null or empty,
+    /// all manuals are searched instead of only those linked to the asset.
+    /// </summary>
     Task<IReadOnlyList<ManualChunk>> SearchByAssetAsync(
-        string assetId,
+        string? assetId,
         ReadOnlyMemory<float> queryEmbedding,
         string queryText,
         int topK = 5,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Lists the distinct manuals that have at least one chunk linked to the asset.</summary>
+    Task<IReadOnlyList<ManualReference>> GetManualsForAssetAsync(
+        string assetId,
         CancellationToken cancellationToken = default);
 }

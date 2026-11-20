@@ -1,0 +1,50 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <base href="/" />
+    <script>
+        // Apply the saved theme before the first paint so the page never flashes the wrong colours.
+        (function () {
+            try {
+                var t = localStorage.getItem("dd-theme");
+                if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+            } catch (e) { /* storage blocked: follow the OS setting */ }
+        })();
+    </script>
+    <ResourcePreloader />
+    <link rel="stylesheet" href="@Assets["app.css"]" />
+    <title>Doc Detectives</title>
+    <link rel="stylesheet" href="@Assets["DocDetectives.Web.styles.css"]" />
+    <ImportMap />
+    <HeadOutlet @rendermode="InteractiveServer" />
+</head>
+
+<body>
+    <Routes @rendermode="InteractiveServer" />
+    <ReconnectModal />
+    <script src="@Assets["_framework/blazor.web.js"]"></script>
+    <script>
+        window.dd = {
+            scrollToBottom: el => { if (el) el.scrollTop = el.scrollHeight; },
+
+            // "system" | "light" | "dark"
+            getTheme: () => {
+                try { return localStorage.getItem("dd-theme") || "system"; } catch (e) { return "system"; }
+            },
+            setTheme: theme => {
+                const root = document.documentElement;
+                if (theme === "light" || theme === "dark") root.setAttribute("data-theme", theme);
+                else root.removeAttribute("data-theme");
+                try {
+                    if (theme === "light" || theme === "dark") localStorage.setItem("dd-theme", theme);
+                    else localStorage.removeItem("dd-theme");
+                } catch (e) { /* storage blocked: choice lasts until reload */ }
+            }
+        };
+    </script>
+</body>
+
+</html>

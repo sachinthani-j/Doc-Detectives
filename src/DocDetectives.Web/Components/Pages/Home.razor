@@ -1,0 +1,113 @@
+﻿@page "/"
+@implements IDisposable
+@inject NavigationManager Nav
+@inject IngestionJobService Jobs
+
+<PageTitle>Overview · Doc Detectives</PageTitle>
+
+<div class="page">
+    <section class="hero">
+        <h1>Find the right manual for every asset</h1>
+        <p>Search your equipment, ask technical questions answered from OEM manuals, and ingest new manuals that are matched to assets automatically.</p>
+
+        <form class="search" @onsubmit="Search">
+            <span class="search-icon"><Icon Name="search" /></span>
+            <input class="input" @bind="_query" placeholder="Search assets by name, manufacturer, model or serial…" aria-label="Search assets" />
+        </form>
+    </section>
+
+    <div class="grid-3" style="margin-bottom:1.75rem">
+        <a class="card action-card" href="assets">
+            <span class="icon-tile"><Icon Name="box" /></span>
+            <h3>Browse assets</h3>
+            <p>Look up equipment from the asset catalog and see which manuals are linked to it.</p>
+        </a>
+        <a class="card action-card" href="ask">
+            <span class="icon-tile"><Icon Name="chat" /></span>
+            <h3>Ask the manuals</h3>
+            <p>Get answers with citations, scoped to one asset or across every ingested manual.</p>
+        </a>
+        <a class="card action-card" href="ingest">
+            <span class="icon-tile"><Icon Name="upload" /></span>
+            <h3>Ingest manuals</h3>
+            <p>Upload PDFs. Specs, spare parts and fault codes are extracted and matched to assets.</p>
+        </a>
+    </div>
+
+    <div class="card">
+        <div class="card-head">
+            <h2>Recent ingestion</h2>
+            <a class="btn btn-sm" href="ingest">Open ingest <Icon Name="arrow-right" Size="14" /></a>
+        </div>
+        @if (_jobs.Count == 0)
+        {
+            <div class="empty">
+                <div class="icon-wrap"><Icon Name="clock" /></div>
+                <h3>No manuals processed yet</h3>
+                <p>Manuals you ingest from this app will show up here.</p>
+            </div>
+        }
+        else
+        {
+            <div class="table-wrap">
+                <table class="table">
+                    <thead><tr><th>Manual</th><th>Status</th><th class="hide-sm">Assets</th><th class="hide-sm">Time</th></tr></thead>
+                    <tbody>
+                        @foreach (var job in _jobs)
+                        {
+                            var status = UiText.Status(job.Status);
+                            <tr class="clickable" @onclick="@(() => Nav.NavigateTo("ingest"))">
+                                <td><span class="asset-name">@job.FileName</span></td>
+                                <td>
+                                    <span class="@status.Css">
+                                        @if (job.Status == IngestionJobStatus.Running) { <span class="spinner" style="width:10px;height:10px"></span> }
+                                        @status.Text
+                                    </span>
+                                    @if (job.Status == IngestionJobStatus.Running && job.Stage is { } stage)
+                                    {
+                                        <span class="subtle" style="margin-left:.4rem">@UiText.Label(stage)</span>
+                                    }
+                                </td>
+                                <td class="hide-sm">
+                                    @if (job.Report is { } r)
+                                    {
+                                        @foreach (var m in r.Mappings.Take(3))
+                                        {
+                                            <span class="tag" style="margin-right:.25rem">@m.AssetId</span>
+                                        }
+                                        @if (r.Mappings.Count == 0) { <span class="subtle">None</span> }
+                                    }
+                                </td>
+                                <td class="hide-sm subtle nowrap">@UiText.Duration(job.Duration)</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    private string _query = "";
+    private List<IngestionJob> _jobs = [];
+
+    protected override void OnInitialized()
+    {
+        Jobs.Changed += OnChanged;
+        _jobs = Jobs.Jobs.Take(5).ToList();
+    }
+
+    private void Search()
+    {
+        Nav.NavigateTo(string.IsNullOrWhiteSpace(_query) ? "assets" : $"assets?q={Uri.EscapeDataString(_query.Trim())}");
+    }
+
+    private void OnChanged()
+    {
+        _jobs = Jobs.Jobs.Take(5).ToList();
+        _ = InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose() => Jobs.Changed -= OnChanged;
+}

@@ -1,0 +1,158 @@
+@page "/asset"
+@inject IAssetCatalogGateway Catalog
+@inject IKnowledgeIndex Knowledge
+
+<PageTitle>@(_asset?.Name ?? "Asset") · Doc Detectives</PageTitle>
+
+<div class="page">
+    <a class="btn btn-ghost btn-sm" href="assets" style="margin-bottom:1rem"><Icon Name="arrow-left" Size="15" /> Assets</a>
+
+    @if (_loading)
+    {
+        <div class="card card-pad stack-sm">
+            <div class="skeleton" style="width:40%;height:22px"></div>
+            <div class="skeleton" style="width:25%"></div>
+        </div>
+    }
+    else if (_error is not null)
+    {
+        <div class="alert alert-danger"><Icon Name="alert" /> <div>@_error</div></div>
+    }
+    else if (_asset is null)
+    {
+        <div class="card">
+            <div class="empty">
+                <div class="icon-wrap"><Icon Name="box" /></div>
+                <h3>Asset not found</h3>
+                <p>No asset with id <span class="mono">@Id</span> exists in the catalog.</p>
+            </div>
+        </div>
+    }
+    else
+    {
+        <div class="page-head">
+            <div class="grow">
+                <div class="eyebrow">Asset <span class="mono">@_asset.Id</span></div>
+                <h1>@(string.IsNullOrEmpty(_asset.Name) ? "(no description)" : _asset.Name)</h1>
+            </div>
+            <a class="btn btn-primary" href="@UiText.AskUrl(_asset.Id)"><Icon Name="chat" Size="16" /> Ask about this asset</a>
+        </div>
+
+        <div class="stack">
+            <div class="card card-pad">
+                <dl class="facts" style="margin:0">
+                    <Fact Label="Manufacturer" Value="@_asset.Manufacturer" />
+                    <Fact Label="Model" Value="@_asset.ModelNumber" />
+                    <Fact Label="Serial number" Value="@_asset.SerialNumber" Mono="true" />
+                    <Fact Label="Type" Value="@_asset.Category" />
+                </dl>
+                @if (_parent is not null)
+                {
+                    <p class="subtle" style="margin-top:1rem">
+                        Part of <a href="@UiText.AssetUrl(_parent.Id)">@_parent.Name</a> <span class="tag">@_parent.Id</span>
+                    </p>
+                }
+            </div>
+
+            @if (_children.Count > 0 || _asset.SpareParts is { Count: > 0 })
+            {
+                <div class="card">
+                    <div class="card-head"><h2>Structure &amp; spare parts</h2></div>
+                    <div class="card-body">
+                        <AssetTree Items="TreeAssets" />
+                    </div>
+                </div>
+            }
+
+            <div class="card">
+                <div class="card-head">
+                    <h2>Linked manuals</h2>
+                    <a class="btn btn-sm" href="ingest"><Icon Name="plus" Size="14" /> Ingest a manual</a>
+                </div>
+                @if (_manuals.Count == 0)
+                {
+                    <div class="empty">
+                        <div class="icon-wrap"><Icon Name="file" /></div>
+                        <h3>No manuals linked yet</h3>
+                        <p>When an ingested manual matches this asset, it appears here.</p>
+                    </div>
+                }
+                else
+                {
+                    <div class="file-list">
+                        @foreach (var m in _manuals)
+                        {
+                            <div class="file-row">
+                                <span class="file-icon">@Ext(m.FileName)</span>
+                                <div class="grow">
+                                    <div class="truncate" style="font-weight:550">@m.FileName</div>
+                                    <div class="subtle">@m.SectionCount indexed section@(m.SectionCount == 1 ? "" : "s")</div>
+                                </div>
+                            </div>
+                        }
+                    </div>
+                }
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    [SupplyParameterFromQuery(Name = "id")] public string? Id { get; set; }
+
+    private Asset? _asset;
+    private IReadOnlyList<ManualReference> _manuals = [];
+    private IReadOnlyList<Asset> _children = [];
+    private Asset? _parent;
+
+    // The asset itself as the tree root (shown without its parent link), followed by its direct children.
+    private IReadOnlyList<Asset> TreeAssets =>
+        _asset is null ? [] : [_asset with { ParentAssetId = null }, .. _children];
+    private bool _loading = true;
+    private string? _error;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _loading = true;
+        _error = null;
+        try
+        {
+            if (string.IsNullOrWhiteSpace(Id))
+            {
+                _asset = null;
+                return;
+            }
+
+            _asset = await Catalog.GetAssetByIdAsync(Id);
+            if (_asset is null)
+            {
+                _manuals = [];
+                _children = [];
+                _parent = null;
+                return;
+            }
+
+            var manuals = Knowledge.GetManualsForAssetAsync(_asset.Id);
+            var children = Catalog.GetChildAssetsAsync(_asset.Id);
+            var parent = string.IsNullOrWhiteSpace(_asset.ParentAssetId)
+                ? Task.FromResult<Asset?>(null)
+                : Catalog.GetAssetByIdAsync(_asset.ParentAssetId);
+
+            await Task.WhenAll(manuals, children, parent);
+            _manuals = manuals.Result;
+            _children = children.Result;
+            _parent = parent.Result;
+        }
+        catch (Exception ex)
+        {
+            _error = $"Could not load the asset: {ex.Message}";
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private static string Ext(string fileName) =>
+        Path.GetExtension(fileName).TrimStart('.').ToUpperInvariant() is { Length: > 0 } e ? e : "DOC";
+}

@@ -1,0 +1,314 @@
+@page "/ask"
+@implements IDisposable
+@inject TechnicalManualQaSkill Qa
+@inject IAssetCatalogGateway Catalog
+@inject NavigationManager Nav
+@inject IJSRuntime JS
+
+<PageTitle>Ask the manuals · Doc Detectives</PageTitle>
+
+<div class="page">
+    <div class="page-head">
+        <div>
+            <div class="eyebrow">Technician assistant</div>
+            <h1>Ask the manuals</h1>
+        </div>
+        @if (_turns.Count > 0)
+        {
+            <button class="btn btn-sm" @onclick="NewChat" disabled="@_busy"><Icon Name="plus" Size="14" /> New chat</button>
+        }
+    </div>
+
+    <div class="chat-layout">
+        <section class="card chat-card">
+            <div class="chat-scroll" @ref="_scroll">
+                @if (_turns.Count == 0)
+                {
+                    <div class="empty" style="margin:auto">
+                        <div class="icon-wrap"><Icon Name="chat" /></div>
+                        <h3>@(_asset is null ? "Ask anything from the ingested manuals" : $"Ask about {_asset.Name}")</h3>
+                        <p>Answers only use manual content and cite the sections they came from.</p>
+                        <div class="suggestions">
+                            @foreach (var s in Suggestions)
+                            {
+                                <button class="suggestion" @onclick="@(() => AskAsync(s))">@s</button>
+                            }
+                        </div>
+                    </div>
+                }
+
+                @foreach (var turn in _turns)
+                {
+                    <div class="msg user"><div class="bubble">@turn.Question</div></div>
+
+                    <div class="msg bot">
+                        <div class="avatar"><Icon Name="magnifier-doc" Size="16" /></div>
+                        <div class="content">
+                            @if (turn.Error is not null)
+                            {
+                                <div class="alert alert-danger"><Icon Name="alert" /> <div>@turn.Error</div></div>
+                            }
+                            else if (turn.Answer.Length == 0 && turn.Streaming)
+                            {
+                                <div class="row subtle"><span class="spinner"></span> @(turn.Sources.Count == 0 ? "Searching manuals…" : "Writing answer…")</div>
+                            }
+                            else
+                            {
+                                <div class="answer @(turn.Streaming ? "typing" : null)">@MarkdownRenderer.ToHtml(turn.Answer.ToString())</div>
+                            }
+
+                            @if (turn.Sources.Count > 0)
+                            {
+                                <div class="sources">
+                                    <div class="subtle">Sources</div>
+                                    @foreach (var src in turn.Sources)
+                                    {
+                                        <details class="source">
+                                            <summary>
+                                                <span class="num">@src.Number</span>
+                                                <span class="grow truncate"><strong>@src.SectionTitle</strong> <span class="subtle">· @src.FileName</span></span>
+                                            </summary>
+                                            <div class="excerpt">@src.Content</div>
+                                        </details>
+                                    }
+                                </div>
+                            }
+                        </div>
+                    </div>
+                }
+            </div>
+
+            <form class="chat-input" @onsubmit="SubmitAsync">
+                <input class="input" style="height:44px" @bind="_question" @bind:event="oninput"
+                       placeholder="@(_asset is null ? "Ask a question about any manual…" : $"Ask about {_asset.Id}…")"
+                       aria-label="Question" disabled="@_busy" autocomplete="off" />
+                @if (_busy)
+                {
+                    <button type="button" class="btn btn-icon" style="height:44px;width:44px" @onclick="Stop" title="Stop"><Icon Name="stop" /></button>
+                }
+                else
+                {
+                    <button type="submit" class="btn btn-primary btn-icon" style="height:44px;width:44px" disabled="@string.IsNullOrWhiteSpace(_question)" title="Send"><Icon Name="send" /></button>
+                }
+            </form>
+        </section>
+
+        <aside class="card card-pad scope-card stack">
+            <div>
+                <h3>Scope</h3>
+                <p class="subtle" style="margin-top:.2rem">Limit answers to manuals linked to one asset, or search everything.</p>
+            </div>
+
+            <div class="scope-current">
+                @if (_asset is null)
+                {
+                    <span class="icon-tile" style="color:var(--accent-text)"><Icon Name="globe" /></span>
+                    <div class="grow">
+                        <div style="font-weight:600">All manuals</div>
+                        <div class="subtle">Every ingested manual is searched.</div>
+                    </div>
+                }
+                else
+                {
+                    <span style="color:var(--accent-text)"><Icon Name="box" /></span>
+                    <div class="grow" style="min-width:0">
+                        <div style="font-weight:600" class="truncate" title="@_asset.Name">@_asset.Name</div>
+                        <div class="subtle mono">@_asset.Id</div>
+                        <div class="subtle">@string.Join(" · ", new[] { _asset.Manufacturer, _asset.ModelNumber }.Where(x => !string.IsNullOrWhiteSpace(x)))</div>
+                    </div>
+                    <button class="btn btn-ghost btn-sm btn-icon" style="width:30px" title="Search all manuals instead" @onclick="ClearAsset" disabled="@_busy"><Icon Name="x" Size="15" /></button>
+                }
+            </div>
+
+            @if (_assetNotFound is not null)
+            {
+                <div class="alert alert-warn"><Icon Name="alert" /> <div>Asset <span class="mono">@_assetNotFound</span> was not found.</div></div>
+            }
+
+            <div class="picker">
+                <label class="subtle" for="asset-picker">Change asset</label>
+                <input id="asset-picker" class="input" style="margin-top:.3rem" placeholder="Search by name or model…"
+                       value="@_pickerText" @oninput="OnPickerInput" disabled="@_busy" autocomplete="off" />
+                @if (_pickerResults.Count > 0)
+                {
+                    <div class="picker-list">
+                        @foreach (var a in _pickerResults)
+                        {
+                            <button class="picker-item" @onclick="@(() => SelectAsset(a))">
+                                <div class="truncate" style="font-weight:550">@(string.IsNullOrEmpty(a.Name) ? "(no description)" : a.Name)</div>
+                                <div class="subtle"><span class="mono">@a.Id</span> @(string.IsNullOrEmpty(a.Manufacturer) ? "" : $"· {a.Manufacturer}")</div>
+                            </button>
+                        }
+                    </div>
+                }
+            </div>
+
+            @if (_asset is not null)
+            {
+                <a class="btn btn-sm" href="@UiText.AssetUrl(_asset.Id)">View asset details <Icon Name="arrow-right" Size="14" /></a>
+            }
+        </aside>
+    </div>
+</div>
+
+@code {
+    [SupplyParameterFromQuery(Name = "asset")] public string? AssetParam { get; set; }
+
+    private static readonly string[] Suggestions =
+    [
+        "How do I calibrate it?",
+        "What are the safety warnings?",
+        "Which spare parts are listed?",
+        "What does an error code mean?"
+    ];
+
+    private sealed class Turn
+    {
+        public required string Question { get; init; }
+        public System.Text.StringBuilder Answer { get; } = new();
+        public IReadOnlyList<AnswerSource> Sources { get; set; } = [];
+        public bool Streaming { get; set; } = true;
+        public string? Error { get; set; }
+    }
+
+    private readonly List<Turn> _turns = [];
+    private ElementReference _scroll;
+    private Asset? _asset;
+    private string? _assetNotFound;
+    private string _question = "";
+    private bool _busy;
+    private CancellationTokenSource? _cts;
+
+    private string _pickerText = "";
+    private IReadOnlyList<Asset> _pickerResults = [];
+    private CancellationTokenSource? _pickerCts;
+    private string? _loadedParam;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (AssetParam == _loadedParam) return;
+        _loadedParam = AssetParam;
+        _assetNotFound = null;
+
+        if (string.IsNullOrWhiteSpace(AssetParam))
+        {
+            _asset = null;
+            return;
+        }
+
+        try
+        {
+            _asset = await Catalog.GetAssetByIdAsync(AssetParam);
+            if (_asset is null) _assetNotFound = AssetParam;
+        }
+        catch
+        {
+            _asset = null;
+            _assetNotFound = AssetParam;
+        }
+    }
+
+    private Task SubmitAsync() => AskAsync(_question);
+
+    private async Task AskAsync(string question)
+    {
+        question = question.Trim();
+        if (question.Length == 0 || _busy) return;
+
+        var turn = new Turn { Question = question };
+        _turns.Add(turn);
+        _question = "";
+        _busy = true;
+        _cts = new CancellationTokenSource();
+        await ScrollAsync();
+
+        try
+        {
+            var context = await Qa.PrepareAsync(_asset?.Id, question, cancellationToken: _cts.Token);
+            turn.Sources = context.Sources;
+            StateHasChanged();
+
+            var lastRender = DateTime.UtcNow;
+            await foreach (var token in Qa.StreamAnswerAsync(context, _cts.Token))
+            {
+                turn.Answer.Append(token);
+                if ((DateTime.UtcNow - lastRender).TotalMilliseconds > 60)
+                {
+                    lastRender = DateTime.UtcNow;
+                    StateHasChanged();
+                    await ScrollAsync();
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            if (turn.Answer.Length == 0) turn.Error = "Stopped.";
+        }
+        catch (Exception ex)
+        {
+            turn.Error = $"Something went wrong: {ex.Message}";
+        }
+        finally
+        {
+            turn.Streaming = false;
+            _busy = false;
+            _cts?.Dispose();
+            _cts = null;
+            StateHasChanged();
+            await ScrollAsync();
+        }
+    }
+
+    private void Stop() => _cts?.Cancel();
+
+    private void NewChat() => _turns.Clear();
+
+    private async Task OnPickerInput(ChangeEventArgs e)
+    {
+        _pickerText = e.Value?.ToString() ?? "";
+        _pickerCts?.Cancel();
+        _pickerCts = new CancellationTokenSource();
+        var token = _pickerCts.Token;
+
+        if (_pickerText.Trim().Length < 2)
+        {
+            _pickerResults = [];
+            return;
+        }
+
+        try
+        {
+            await Task.Delay(300, token); // debounce while typing
+            var results = await Catalog.SearchAssetsAsync(null, _pickerText.Trim(), token);
+            if (!token.IsCancellationRequested) _pickerResults = results.Take(8).ToList();
+        }
+        catch (OperationCanceledException) { }
+        catch { _pickerResults = []; }
+    }
+
+    private void SelectAsset(Asset asset)
+    {
+        _pickerText = "";
+        _pickerResults = [];
+        _turns.Clear();
+        Nav.NavigateTo(UiText.AskUrl(asset.Id));
+    }
+
+    private void ClearAsset()
+    {
+        _turns.Clear();
+        Nav.NavigateTo("ask");
+    }
+
+    private async Task ScrollAsync()
+    {
+        try { await JS.InvokeVoidAsync("dd.scrollToBottom", _scroll); }
+        catch { /* prerendering or disconnected */ }
+    }
+
+    public void Dispose()
+    {
+        _cts?.Cancel();
+        _pickerCts?.Cancel();
+    }
+}

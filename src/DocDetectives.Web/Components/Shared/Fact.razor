@@ -1,0 +1,17 @@
+<div class="fact">
+    <dt>@Label</dt>
+    @if (string.IsNullOrWhiteSpace(Value))
+    {
+        <dd class="empty-val">Not recorded</dd>
+    }
+    else
+    {
+        <dd class="@(Mono ? "mono" : null)">@Value</dd>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public string Label { get; set; } = "";
+    [Parameter] public string? Value { get; set; }
+    [Parameter] public bool Mono { get; set; }
+}

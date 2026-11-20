@@ -68,17 +68,16 @@ public sealed class AzureAiSearchKnowledgeIndex : IKnowledgeIndex
     }
 
     public async Task<IReadOnlyList<ManualChunk>> SearchByAssetAsync(
-        string assetId,
+        string? assetId,
         ReadOnlyMemory<float> queryEmbedding,
         string queryText,
         int topK = 5,
         CancellationToken cancellationToken = default)
     {
-        var escapedAssetId = assetId.Replace("'", "''");
         var searchOptions = new SearchOptions
         {
             Size = topK,
-            Filter = $"assetIds/any(id: id eq '{escapedAssetId}')",
+            Filter = string.IsNullOrWhiteSpace(assetId) ? null : AssetFilter(assetId),
             VectorSearch = new VectorSearchOptions
             {
                 Queries =
@@ -107,12 +106,54 @@ public sealed class AzureAiSearchKnowledgeIndex : IKnowledgeIndex
                 FileName: doc["fileName"]?.ToString() ?? string.Empty,
                 SectionTitle: doc["sectionTitle"]?.ToString() ?? string.Empty,
                 Content: doc["content"]?.ToString() ?? string.Empty,
-                AssetIds: [assetId],
+                AssetIds: doc.TryGetValue("assetIds", out var ids) && ids is IEnumerable<object> items
+                    ? items.Select(i => i?.ToString()).OfType<string>().ToList()
+                    : [],
                 Embedding: ReadOnlyMemory<float>.Empty));
         }
 
         return results;
     }
+
+    public async Task<IReadOnlyList<ManualReference>> GetManualsForAssetAsync(
+        string assetId,
+        CancellationToken cancellationToken = default)
+    {
+        var searchOptions = new SearchOptions
+        {
+            Filter = AssetFilter(assetId),
+            Size = 1000,
+            Select = { "manualId", "fileName" }
+        };
+
+        Response<SearchResults<SearchDocument>> response;
+        try
+        {
+            response = await _searchClient.SearchAsync<SearchDocument>("*", searchOptions, cancellationToken);
+        }
+        catch (RequestFailedException ex) when (ex.Status == 404)
+        {
+            return []; // manuals index not created yet
+        }
+
+        var sections = new Dictionary<string, (string FileName, int Count)>(StringComparer.Ordinal);
+        await foreach (var result in response.Value.GetResultsAsync().WithCancellation(cancellationToken))
+        {
+            var manualId = result.Document["manualId"]?.ToString() ?? string.Empty;
+            var fileName = result.Document["fileName"]?.ToString() ?? string.Empty;
+            sections[manualId] = sections.TryGetValue(manualId, out var existing)
+                ? (existing.FileName, existing.Count + 1)
+                : (fileName, 1);
+        }
+
+        return sections
+            .Select(s => new ManualReference(s.Key, s.Value.FileName, s.Value.Count))
+            .OrderBy(m => m.FileName, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static string AssetFilter(string assetId) =>
+        $"assetIds/any(id: id eq '{assetId.Replace("'", "''")}')";
 
     private async Task EnsureIndexExistsAsync(CancellationToken cancellationToken)
     {

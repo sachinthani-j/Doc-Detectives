@@ -1,0 +1,63 @@
+﻿@inherits LayoutComponentBase
+@implements IDisposable
+@inject IngestionJobService Jobs
+
+<div class="shell">
+    <aside class="sidebar">
+        <a class="brand" href="">
+            <span class="brand-mark"><Icon Name="magnifier-doc" Size="19" Stroke="2" /></span>
+            <span>
+                <span class="brand-name">Doc Detectives</span><br />
+                <span class="brand-sub">Manual intelligence</span>
+            </span>
+        </a>
+
+        <nav class="nav">
+            <NavLink href="" Match="NavLinkMatch.All"><Icon Name="home" /><span class="label">Overview</span></NavLink>
+            <NavLink href="assets"><Icon Name="box" /><span class="label">Assets</span></NavLink>
+            <NavLink href="ask"><Icon Name="chat" /><span class="label">Ask the manuals</span></NavLink>
+            <NavLink href="ingest">
+                <Icon Name="upload" /><span class="label">Ingest manuals</span>
+                @if (_activeJobs > 0)
+                {
+                    <span class="badge-count" title="Manuals being processed">@_activeJobs</span>
+                }
+            </NavLink>
+        </nav>
+
+        <div class="sidebar-bottom">
+            <ThemeToggle />
+            <div class="sidebar-foot">Azure AI Search · Content Understanding · Azure OpenAI</div>
+        </div>
+    </aside>
+
+    <main class="main">
+        @Body
+    </main>
+</div>
+
+<div id="blazor-error-ui" data-nosnippet>
+    Something went wrong. <a href="." class="reload">Reload</a>
+    <span class="dismiss">🗙</span>
+</div>
+
+@code {
+    private int _activeJobs;
+
+    protected override void OnInitialized()
+    {
+        Jobs.Changed += OnJobsChanged;
+        Count();
+    }
+
+    private void Count() =>
+        _activeJobs = Jobs.Jobs.Count(j => j.Status is IngestionJobStatus.Queued or IngestionJobStatus.Running);
+
+    private void OnJobsChanged()
+    {
+        Count();
+        _ = InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose() => Jobs.Changed -= OnJobsChanged;
+}

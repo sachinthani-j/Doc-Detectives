@@ -41,6 +41,20 @@ public sealed record DocumentProcessingReport(
     AssetProposal? AssetProposal = null,
     string? ManufacturerDetailsNote = null);
 
+/// <summary>
+/// The steps of <see cref="ManualIngestionOrchestrator.ProcessDocumentAsync"/>, in order.
+/// Inspection documents jump from <see cref="AnalyzingStructure"/> (classification) straight to <see cref="Completed"/>.
+/// </summary>
+public enum IngestionStage
+{
+    ExtractingContent,
+    AnalyzingStructure,
+    MatchingAssets,
+    EmbeddingChunks,
+    StoringInIndex,
+    Completed
+}
+
 public sealed class ManualIngestionOrchestrator(
     IManualExtractor manualExtractor,
     DocumentClassificationSkill classificationSkill,
@@ -83,9 +97,11 @@ public sealed class ManualIngestionOrchestrator(
         bool extractCharacteristics = true,
         bool reviewNewAssets = true,
         bool createInspectionJobs = false,
+        IProgress<IngestionStage>? progress = null,
         CancellationToken cancellationToken = default)
     {
         // 1. Extract layout-aware Markdown via Azure AI Content Understanding
+        progress?.Report(IngestionStage.ExtractingContent);
         ExtractedManual rawDocument;
         await using (var stream = File.OpenRead(filePath))
         {
@@ -93,6 +109,7 @@ public sealed class ManualIngestionOrchestrator(
         }
 
         // 2. Decide what kind of document this is
+        progress?.Report(IngestionStage.AnalyzingStructure);
         var classification = await classificationSkill.ClassifyAsync(rawDocument, cancellationToken);
 
         if (classification.DocumentType == DocumentType.Inspection)
@@ -106,11 +123,12 @@ public sealed class ManualIngestionOrchestrator(
                     rawDocument, DocumentType.Inspection, inspection?.Asset?.Id, autoLinkThreshold, cancellationToken)
                 : null;
 
+            progress?.Report(IngestionStage.Completed);
             return new DocumentProcessingReport(
                 rawDocument.ManualId, rawDocument.FileName, classification, null, inspection, inspectionPlans);
         }
 
-        var manual = await ProcessManualAsync(rawDocument, autoLinkThreshold, autoCreateAssets, reviewNewAssets, cancellationToken);
+        var manual = await ProcessManualAsync(rawDocument, autoLinkThreshold, autoCreateAssets, reviewNewAssets, progress, cancellationToken);
 
         // The manual's asset: the one just created or proposed, otherwise the best auto-linked existing asset.
         // A proposed asset keeps its ID through review, so drafted job plans can already point to it.
@@ -140,6 +158,7 @@ public sealed class ManualIngestionOrchestrator(
                 manual.ProposedAssets,
                 proposedCharacteristics);
 
+            progress?.Report(IngestionStage.Completed);
             return new DocumentProcessingReport(
                 rawDocument.ManualId, rawDocument.FileName, classification, manual, null, manualPlans, null, proposal);
         }
@@ -158,6 +177,7 @@ public sealed class ManualIngestionOrchestrator(
                 cancellationToken)
             : null;
 
+        progress?.Report(IngestionStage.Completed);
         return new DocumentProcessingReport(
             rawDocument.ManualId, rawDocument.FileName, classification, manual, null, manualPlans, characteristics,
             null, manufacturerNote);
@@ -204,9 +224,9 @@ public sealed class ManualIngestionOrchestrator(
         double autoLinkThreshold,
         bool autoCreateAssets,
         bool reviewNewAssets,
+        IProgress<IngestionStage>? progress,
         CancellationToken cancellationToken)
     {
-
         // 3. Extract typed equipment asset structure via LLM Structured Outputs
         var structure = await structureExtractionSkill.ExtractStructureAsync(rawManual, cancellationToken);
         var enrichedManual = rawManual with
@@ -218,6 +238,7 @@ public sealed class ManualIngestionOrchestrator(
         };
 
         // 4. Match extracted asset metadata against existing system assets
+        progress?.Report(IngestionStage.MatchingAssets);
         IReadOnlyList<AssetMappingResult> mappings = await matchingSkill.MatchManualToAssetsAsync(
             enrichedManual,
             autoLinkThreshold,
@@ -307,6 +328,7 @@ public sealed class ManualIngestionOrchestrator(
 
         // 6. Generate vector embeddings for all extracted info & manual sections
         //    Only the text sent for embedding is shortened; the full Content is still stored and returned to the LLM.
+        progress?.Report(IngestionStage.EmbeddingChunks);
         var embeddingInputs = allChunks.Select(c => TruncateForEmbedding(
             $"Manual: {c.FileName} | Manufacturer: {enrichedManual.Manufacturer ?? "Unknown"} | " +
             $"Models: {string.Join(", ", enrichedManual.ModelNumbers)} | Section: {c.SectionTitle}\n" +
@@ -320,13 +342,11 @@ public sealed class ManualIngestionOrchestrator(
             .Select((chunk, idx) => chunk with { Embedding = embeddings[idx].Vector })
             .ToList();
 
-        // 7. Store embedded chunks and extracted structured data in the docdetectives-manuals index
-        //    (AzureSearch:IndexName). UpsertChunksAsync creates or updates that index, then merges these chunks.
-        _ = knowledgeIndex;
-        // await knowledgeIndex.UpsertChunksAsync(vectorizedChunks, cancellationToken);
+        // 7. Store embedded chunks & extracted structured data in Azure AI Search
+        progress?.Report(IngestionStage.StoringInIndex);
+        await knowledgeIndex.UpsertChunksAsync(vectorizedChunks, cancellationToken);
 
-        return new ManualProcessingReport(
-            enrichedManual, mappings, vectorizedChunks.Count, assetCreationNote, createdAssets, proposedAssets);
+        return new ManualProcessingReport(enrichedManual, mappings, vectorizedChunks.Count, assetCreationNote, createdAssets, proposedAssets);
     }
 
     // The embedding model accepts at most 8192 tokens per input. Technical text (part numbers, tables)

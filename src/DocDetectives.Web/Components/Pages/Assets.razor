@@ -1,0 +1,159 @@
+@page "/assets"
+@inject IAssetCatalogGateway Catalog
+@inject NavigationManager Nav
+
+<PageTitle>Assets · Doc Detectives</PageTitle>
+
+<div class="page">
+    <div class="page-head">
+        <div>
+            <div class="eyebrow">Asset catalog</div>
+            <h1>Assets</h1>
+            <p class="muted">Search equipment by description, manufacturer code, model or serial number.</p>
+        </div>
+    </div>
+
+    <form class="row" style="margin-bottom:1.25rem" @onsubmit="SubmitAsync">
+        <div class="search grow">
+            <span class="search-icon"><Icon Name="search" /></span>
+            <input class="input" @bind="_query" placeholder="e.g. Priva controller, Intermec PM4i, KARO…" aria-label="Search assets" autofocus />
+        </div>
+        <button class="btn btn-primary" style="height:44px" type="submit" disabled="@_loading">
+            @if (_loading) { <span class="spinner"></span> } Search
+        </button>
+    </form>
+
+    @if (_error is not null)
+    {
+        <div class="alert alert-danger" style="margin-bottom:1rem"><Icon Name="alert" /> <div>@_error</div></div>
+    }
+
+    <div class="card">
+        @if (_loading && _results is null)
+        {
+            <div class="card-body stack-sm">
+                @for (var i = 0; i < 6; i++) { <div class="skeleton" style="width:@(90 - i * 7)%"></div> }
+            </div>
+        }
+        else if (_results is null)
+        {
+            <div class="empty">
+                <div class="icon-wrap"><Icon Name="search" /></div>
+                <h3>Search the asset catalog</h3>
+                <p>Type a description, manufacturer code or model number above.</p>
+            </div>
+        }
+        else if (_results.Count == 0)
+        {
+            <div class="empty">
+                <div class="icon-wrap"><Icon Name="box" /></div>
+                <h3>No assets found</h3>
+                <p>Try fewer words, a manufacturer code, or part of the model number.</p>
+            </div>
+        }
+        else
+        {
+            <div class="card-head">
+                <span class="subtle">Top @_results.Count result@(_results.Count == 1 ? "" : "s") for “@_searched”</span>
+            </div>
+            <div class="table-wrap">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Asset</th>
+                            <th>Manufacturer</th>
+                            <th class="hide-sm">Model</th>
+                            <th class="hide-sm">Serial</th>
+                            <th class="hide-sm">Type</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var a in _results)
+                        {
+                            <tr class="clickable" @onclick="@(() => Nav.NavigateTo(UiText.AssetUrl(a.Id)))">
+                                <td>
+                                    <div class="asset-name">@(string.IsNullOrEmpty(a.Name) ? "(no description)" : a.Name)</div>
+                                    <div class="subtle mono">@a.Id</div>
+                                </td>
+                                <td>@Dash(a.Manufacturer)</td>
+                                <td class="hide-sm">@Dash(a.ModelNumber)</td>
+                                <td class="hide-sm mono">@Dash(a.SerialNumber)</td>
+                                <td class="hide-sm">@Dash(a.Category)</td>
+                                <td style="text-align:right">
+                                    <a class="btn btn-sm btn-ghost" href="@UiText.AskUrl(a.Id)" @onclick:stopPropagation="true" title="Ask about this asset">
+                                        <Icon Name="chat" Size="15" /> <span class="hide-sm">Ask</span>
+                                    </a>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    [SupplyParameterFromQuery(Name = "q")] public string? Q { get; set; }
+
+    private string _query = "";
+    private string _searched = "";
+    private bool _loading;
+    private string? _error;
+    private IReadOnlyList<Asset>? _results;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (!string.IsNullOrWhiteSpace(Q) && Q != _searched)
+        {
+            _query = Q;
+            await RunSearchAsync();
+        }
+    }
+
+    private Task SubmitAsync()
+    {
+        var q = _query.Trim();
+        if (q.Length == 0) return Task.CompletedTask;
+
+        // Keep the search in the URL so it can be shared and survives a refresh.
+        Nav.NavigateTo($"assets?q={Uri.EscapeDataString(q)}");
+        return Task.CompletedTask;
+    }
+
+    private async Task RunSearchAsync()
+    {
+        _loading = true;
+        _error = null;
+        try
+        {
+            _searched = _query.Trim();
+            _results = await Catalog.SearchAssetsAsync(null, _searched);
+        }
+        catch (Exception ex)
+        {
+            _error = $"Search failed: {ex.Message}";
+            _results = null;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private static RenderFragment Dash(string? value) => builder =>
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            builder.OpenElement(0, "span");
+            builder.AddAttribute(1, "class", "subtle");
+            builder.AddContent(2, "—");
+            builder.CloseElement();
+        }
+        else
+        {
+            builder.AddContent(3, value);
+        }
+    };
+}

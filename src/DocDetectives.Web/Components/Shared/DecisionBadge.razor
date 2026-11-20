@@ -1,0 +1,16 @@
+@switch (Decision)
+{
+    case ReviewDecision.Approved:
+        <span class="badge badge-ok">Approved</span>
+        break;
+    case ReviewDecision.Rejected:
+        <span class="badge">Rejected</span>
+        break;
+    default:
+        <span class="badge badge-warn">Needs review</span>
+        break;
+}
+
+@code {
+    [Parameter] public ReviewDecision Decision { get; set; }
+}

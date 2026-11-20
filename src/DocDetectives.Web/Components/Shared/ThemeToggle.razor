@@ -1,0 +1,43 @@
+@inject IJSRuntime JS
+
+<div class="theme-toggle" role="radiogroup" aria-label="Colour theme">
+    @foreach (var option in Options)
+    {
+        <button type="button" role="radio" aria-checked="@(_theme == option.Value ? "true" : "false")"
+                class="@(_theme == option.Value ? "on" : null)" title="@option.Label"
+                @onclick="@(() => SetAsync(option.Value))">
+            <Icon Name="@option.Icon" Size="15" />
+            <span class="label">@option.Label</span>
+        </button>
+    }
+</div>
+
+@code {
+    private static readonly (string Value, string Label, string Icon)[] Options =
+    [
+        ("light", "Light", "sun"),
+        ("dark", "Dark", "moon"),
+        ("system", "Auto", "monitor")
+    ];
+
+    private string _theme = "system";
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+
+        try
+        {
+            _theme = await JS.InvokeAsync<string>("dd.getTheme");
+            StateHasChanged();
+        }
+        catch (JSDisconnectedException) { }
+    }
+
+    private async Task SetAsync(string theme)
+    {
+        _theme = theme;
+        try { await JS.InvokeVoidAsync("dd.setTheme", theme); }
+        catch (JSDisconnectedException) { }
+    }
+}
