@@ -20,14 +20,72 @@
         }
     </div>
 }
+else if (Doc.Manual is not null)
+{
+    @* Characteristics were skipped during upload: extract them on request and save only after consent. *@
+    var charDraft = Job.CharacteristicDraft;
+    var charDecision = Job.CharacteristicDecision;
+    var targetAsset = Job.CharacteristicsAssetId;
+    var pendingSave = charDraft is { WouldFill.Count: > 0 } && charDecision == ReviewDecision.Pending;
+    var shownValues = charDecision == ReviewDecision.Approved ? Job.SavedCharacteristics?.Filled
+                    : charDecision == ReviewDecision.Pending ? charDraft?.WouldFill
+                    : null;
+    var canExtract = targetAsset is not null && charDecision != ReviewDecision.Approved && !pendingSave;
+    <div class="review-card @(pendingSave ? "pending" : null)">
+        <div class="review-head">
+            <div class="grow">
+                <h3>Characteristics</h3>
+                <p class="subtle">
+                    @if (charDecision == ReviewDecision.Approved && Job.SavedCharacteristics is { } saved) { @saved.Note }
+                    else if (charDecision == ReviewDecision.Rejected) { <span>Discarded; nothing was saved.</span> }
+                    else if (charDraft is not null) { @charDraft.Note }
+                    else if (targetAsset is null) { <span>Link an asset above (or approve the new asset proposal) to fill its characteristics from this manual.</span> }
+                    else { <span>Not extracted yet, to keep the upload fast. Extract them to review the values for asset <span class="mono">@targetAsset</span>; nothing is saved without your OK.</span> }
+                </p>
+            </div>
+            @if (charDraft is { WouldFill.Count: > 0 }) { <DecisionBadge Decision="charDecision" /> }
+        </div>
+
+        @if (shownValues is { Count: > 0 })
+        {
+            <div class="char-grid">
+                @foreach (var c in shownValues)
+                {
+                    <div class="char"><span class="char-name">@c.Name</span><span class="char-val">@Format(c)</span></div>
+                }
+            </div>
+        }
+
+        @if (pendingSave)
+        {
+            <div class="row">
+                <button class="btn btn-primary btn-sm" disabled="@_charBusy" @onclick="SaveCharacteristicsAsync">
+                    @if (_charBusy) { <span class="spinner"></span> } else { <Icon Name="check" Size="14" /> } Save to asset
+                </button>
+                <button class="btn btn-sm" disabled="@_charBusy" @onclick="@(() => Jobs.DiscardCharacteristics(Job))"><Icon Name="x" Size="14" /> Discard</button>
+            </div>
+        }
+        else if (canExtract)
+        {
+            <div class="row">
+                <button class="btn btn-sm" disabled="@_charBusy" @onclick="ExtractCharacteristicsAsync">
+                    @if (_charBusy) { <span class="spinner"></span> }
+                    @(charDraft is null ? "Extract characteristics" : "Extract again")
+                </button>
+                @if (_charBusy) { <span class="subtle">This can take about half a minute.</span> }
+            </div>
+        }
+    </div>
+}
 
 @if (!string.IsNullOrWhiteSpace(Doc.ManufacturerDetailsNote))
 {
     <p class="subtle">Asset details: @Doc.ManufacturerDetailsNote</p>
 }
 
-@if (Doc.AssetProposal is { } proposal)
+@if (Job.CurrentProposal is { } proposal)
 {
+    @* Shown as changed in the chat, when it was. *@
     var decision = Job.AssetProposalDecision;
     var newCount = proposal.NewAssets.Count;
     var mapsOntoExisting = proposal.IsExisting(proposal.Assets[0].Id);
@@ -148,8 +206,10 @@
                             <div class="alert alert-info"><Icon Name="alert" /> <div>Decide on the new asset proposal first, so PM models only link to assets that exist.</div></div>
                         }
 
-                        @foreach (var draft in plans.Plans)
+                        @foreach (var original in plans.Plans)
                         {
+            // The draft as changed in the chat, when it was (same Id, so decisions still match).
+            var draft = Job.CurrentPlan(original);
             var decision = Job.PlanDecision(draft);
             var expanded = _expandedPlans.Contains(draft.Id);
             // What approving creates: the PM model with one PM job per piece of equipment.
@@ -160,7 +220,7 @@
                 <div class="review-head">
                     <span class="pm-model-icon"><Icon Name="layers" Size="18" /></span>
                     <div class="grow">
-                        <div class="pm-model-title">@draft.Title</div>
+                        <div class="pm-model-title">@draft.Title @if (Job.EditedPlans.ContainsKey(draft.Id)) { <span class="badge badge-info">edited</span> }</div>
                         <div class="pm-model-meta">
                             <span class="tag" title="@draft.Id">@draft.Id</span>
                             @if (!string.IsNullOrWhiteSpace(draft.Interval)) { <span class="pm-pill freq"><Icon Name="clock" Size="13" /> @Every(draft.Interval)</span> }
@@ -279,6 +339,24 @@
     private void TogglePlan(string id)
     {
         if (!_expandedPlans.Remove(id)) _expandedPlans.Add(id);
+    }
+
+    private bool _charBusy;
+
+    private async Task ExtractCharacteristicsAsync() => await RunCharacteristicsAsync(
+        () => Jobs.ExtractCharacteristicsAsync(Job), "extract the characteristics");
+
+    private async Task SaveCharacteristicsAsync() => await RunCharacteristicsAsync(
+        () => Jobs.SaveCharacteristicsAsync(Job), "save the characteristics");
+
+    // Own busy flag, so a half-minute extraction doesn't block approving PM models meanwhile.
+    private async Task RunCharacteristicsAsync(Func<Task> action, string what)
+    {
+        _charBusy = true;
+        _error = null;
+        try { await action(); }
+        catch (Exception ex) { _error = $"Could not {what}: {ex.Message}"; }
+        finally { _charBusy = false; }
     }
 
     private async Task ApproveProposalAsync() => await RunAsync(() => Jobs.ApproveAssetProposalAsync(Job), "create the assets");

@@ -24,6 +24,12 @@ public sealed class DocDetectivesOptions
     public bool ExtractCharacteristics { get; set; } = true;
 
     /// <summary>
+    /// Web app: skip characteristics during upload (one slow AI call less) and extract them only when the user asks,
+    /// showing the values for consent before anything is saved. Off: they are filled during upload as before.
+    /// </summary>
+    public bool AskBeforeCharacteristics { get; set; } = true;
+
+    /// <summary>
     /// How many documents to ingest at once. Each document still goes through Content Understanding,
     /// classification, extraction, matching, and embedding in that order.
     /// </summary>

@@ -244,7 +244,9 @@
                                     </button>
                                 }
                             </div>
-                            <p class="subtle">@report.EmbeddedChunkCount sections indexed for Q&amp;A</p>
+                            <p class="subtle">@(report.AlreadyIndexed
+                                ? $"Already indexed ({report.EmbeddedChunkCount} sections); not indexed again"
+                                : $"{report.EmbeddedChunkCount} sections indexed for Q&A")</p>
 
                             @if (s is not null)
                             {
@@ -407,7 +409,7 @@
                 }
 
                 @if (open && job.Document is { } reviewDoc
-                     && (reviewDoc.AssetProposal is not null || reviewDoc.JobPlans is not null || reviewDoc.Characteristics is not null || reviewDoc.ManufacturerDetailsNote is not null))
+                     && (reviewDoc.Manual is not null || reviewDoc.AssetProposal is not null || reviewDoc.JobPlans is not null || reviewDoc.Characteristics is not null || reviewDoc.ManufacturerDetailsNote is not null))
                 {
                     <div class="job-body">
                         <ReviewPanel Job="job" />

@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Threading.Channels;
 using DocDetectives.Application.Ingestion;
+using DocDetectives.Application.Skills;
 using DocDetectives.Domain.Abstractions;
 using DocDetectives.Domain.Entities;
 using DocDetectives.Infrastructure.Configuration;
@@ -12,6 +13,12 @@ public enum IngestionJobStatus { Queued, Running, Succeeded, Failed }
 
 /// <summary>A person's decision on a proposed new asset or a drafted PM model.</summary>
 public enum ReviewDecision { Pending, Approved, Rejected }
+
+/// <summary>Which draft of a job a plain-words edit applies to.</summary>
+public enum ReviewEditTarget { Proposal, Characteristics, Plan }
+
+/// <summary>Result of a plain-words edit: what changed, and what could not be changed.</summary>
+public sealed record ReviewEditResult(string? Summary, IReadOnlyList<string> Refused);
 
 /// <summary>One manual going through the ingestion pipeline. Mutated only by <see cref="IngestionJobService"/>.</summary>
 public sealed class IngestionJob
@@ -102,7 +109,71 @@ public sealed class IngestionJob
     /// <summary>True while a proposed asset or a drafted PM model is still waiting for a person's decision.</summary>
     public bool NeedsReview =>
         (Document?.AssetProposal is not null && AssetProposalDecision == ReviewDecision.Pending)
-        || (Document?.JobPlans?.Plans.Any(p => PlanDecision(p) == ReviewDecision.Pending) ?? false);
+        || (Document?.JobPlans?.Plans.Any(p => PlanDecision(p) == ReviewDecision.Pending) ?? false)
+        || (CharacteristicDraft is { WouldFill.Count: > 0 } && CharacteristicDecision == ReviewDecision.Pending);
+
+    // ---------- Characteristics, extracted only when the person asks ----------
+
+    /// <summary>Characteristics extracted on request, waiting for consent; null until the person asks.</summary>
+    public CharacteristicDraft? CharacteristicDraft { get; internal set; }
+
+    public ReviewDecision CharacteristicDecision { get; internal set; } = ReviewDecision.Pending;
+
+    /// <summary>What was saved after the person agreed.</summary>
+    public CharacteristicReport? SavedCharacteristics { get; internal set; }
+
+    /// <summary>
+    /// The existing asset characteristics would be filled on: the new main asset once it is created, otherwise the
+    /// highest-scoring linked match. Null while there is no such asset yet.
+    /// </summary>
+    public string? CharacteristicsAssetId
+    {
+        get
+        {
+            if (Report?.Mappings.FirstOrDefault(m => m.Status == MappingStatus.Proposed) is { } proposed)
+            {
+                return AssetProposalDecision == ReviewDecision.Approved ? proposed.AssetId : null;
+            }
+
+            if (Report?.Mappings.FirstOrDefault(m => m.Status == MappingStatus.Created) is { } created)
+            {
+                return created.AssetId;
+            }
+
+            return SelectableMatches
+                .Where(m => LinkedAssetIds.ContainsKey(m.AssetId))
+                .OrderByDescending(m => m.ConfidenceScore)
+                .FirstOrDefault()?.AssetId;
+        }
+    }
+
+    // ---------- Edited working copies (changed in plain words before submitting) ----------
+
+    /// <summary>The proposal as the person changed it; null when unchanged.</summary>
+    public AssetProposal? EditedProposal { get; internal set; }
+
+    internal Stack<AssetProposal?> ProposalUndo { get; } = new();
+
+    /// <summary>PM drafts as the person changed them, keyed by draft Id (the Id never changes).</summary>
+    public ConcurrentDictionary<string, JobPlan> EditedPlans { get; } = new(StringComparer.Ordinal);
+
+    internal ConcurrentDictionary<string, Stack<JobPlan?>> PlanUndo { get; } = new(StringComparer.Ordinal);
+
+    internal Stack<CharacteristicDraft> CharacteristicUndo { get; } = new();
+
+    /// <summary>The proposal to show and submit: the edited one when there is one.</summary>
+    public AssetProposal? CurrentProposal => EditedProposal ?? Document?.AssetProposal;
+
+    /// <summary>The PM draft to show and submit: the edited one when there is one.</summary>
+    public JobPlan CurrentPlan(JobPlan draft) => EditedPlans.GetValueOrDefault(draft.Id, draft);
+
+    public bool CanUndo(ReviewEditTarget target, string? planId = null) => target switch
+    {
+        ReviewEditTarget.Proposal => ProposalUndo.Count > 0,
+        ReviewEditTarget.Characteristics => CharacteristicUndo.Count > 0,
+        ReviewEditTarget.Plan => planId is not null && PlanUndo.TryGetValue(planId, out var s) && s.Count > 0,
+        _ => false
+    };
 
     public TimeSpan? Duration => StartedAt is null ? null : (FinishedAt ?? DateTimeOffset.Now) - StartedAt;
 }
@@ -229,10 +300,13 @@ public sealed class IngestionJobService(
         }
     }
 
-    /// <summary>Creates the proposed asset tree (and its new characteristics) after a person approved it.</summary>
+    /// <summary>
+    /// Creates the proposed asset tree (and its new characteristics) after a person approved it — as the person
+    /// changed it, when they did.
+    /// </summary>
     public async Task ApproveAssetProposalAsync(IngestionJob job, CancellationToken cancellationToken = default)
     {
-        if (job.Document?.AssetProposal is not { } proposal || job.AssetProposalDecision != ReviewDecision.Pending)
+        if (job.CurrentProposal is not { } proposal || job.AssetProposalDecision != ReviewDecision.Pending)
         {
             return;
         }
@@ -264,12 +338,15 @@ public sealed class IngestionJobService(
     /// <summary>
     /// Creates the PM model of an approved draft (with its PM jobs and lines) on every asset the manual is linked to.
     /// </summary>
-    public async Task ApproveJobPlanAsync(IngestionJob job, JobPlan plan, CancellationToken cancellationToken = default)
+    public async Task ApproveJobPlanAsync(IngestionJob job, JobPlan draft, CancellationToken cancellationToken = default)
     {
-        if (!CanReviewPlans(job) || job.PlanDecision(plan) != ReviewDecision.Pending)
+        if (!CanReviewPlans(job) || job.PlanDecision(draft) != ReviewDecision.Pending)
         {
             return;
         }
+
+        // The draft as the person changed it, when they did (same Id).
+        var plan = job.CurrentPlan(draft);
 
         var assetIds = job.PmModelAssetIds(plan);
         if (assetIds.Count == 0)
@@ -277,9 +354,14 @@ public sealed class IngestionJobService(
             throw new InvalidOperationException("the manual is not linked to any asset, and a PM model needs one.");
         }
 
-        // Line links to assets that were rejected (so never created) are removed first.
-        var rejected = job.AssetProposalDecision == ReviewDecision.Rejected && job.Document?.AssetProposal is { } proposal
-            ? proposal.Assets.Select(a => a.Id).ToHashSet(StringComparer.Ordinal)
+        // Line links to assets that were never created are removed first: a rejected proposal, or sub-assets the
+        // person removed from the proposal before approving it.
+        var rejected = job.Document?.AssetProposal is { } proposal
+            ? job.AssetProposalDecision == ReviewDecision.Rejected
+                ? proposal.Assets.Select(a => a.Id).ToHashSet(StringComparer.Ordinal)
+                : proposal.Assets.Select(a => a.Id)
+                    .Except(job.CurrentProposal!.Assets.Select(a => a.Id), StringComparer.Ordinal)
+                    .ToHashSet(StringComparer.Ordinal)
             : [];
 
         var toSave = plan with
@@ -296,6 +378,136 @@ public sealed class IngestionJobService(
         job.CreatedPmModels[plan.Id] = await pmService.CreatePmModelsAsync(toSave, assetIds, cancellationToken);
         job.JobPlanDecisions[plan.Id] = ReviewDecision.Approved;
         NotifyChanged();
+    }
+
+    // ---------- Characteristics on request ----------
+
+    /// <summary>Extracts characteristic values for the manual's asset and keeps them on the job for review. Nothing is saved.</summary>
+    public async Task ExtractCharacteristicsAsync(IngestionJob job, CancellationToken cancellationToken = default)
+    {
+        if (job.Report is not { } report || job.CharacteristicsAssetId is not { } assetId)
+        {
+            return;
+        }
+
+        await using var scope = services.CreateAsyncScope();
+        var characteristics = scope.ServiceProvider.GetRequiredService<CharacteristicService>();
+
+        job.CharacteristicDraft = await characteristics.DraftForAssetAsync(assetId, report.ExtractedManual, cancellationToken);
+        job.CharacteristicDecision = ReviewDecision.Pending;
+        job.SavedCharacteristics = null;
+        job.CharacteristicUndo.Clear();
+        NotifyChanged();
+    }
+
+    /// <summary>Saves the extracted (possibly changed) characteristics after the person agreed; only empty values are filled.</summary>
+    public async Task SaveCharacteristicsAsync(IngestionJob job, CancellationToken cancellationToken = default)
+    {
+        if (job.CharacteristicDraft is not { WouldFill.Count: > 0 } draft || job.CharacteristicDecision != ReviewDecision.Pending)
+        {
+            return;
+        }
+
+        await using var scope = services.CreateAsyncScope();
+        var characteristics = scope.ServiceProvider.GetRequiredService<CharacteristicService>();
+
+        job.SavedCharacteristics = await characteristics.SaveDraftAsync(draft, cancellationToken);
+        job.CharacteristicDecision = ReviewDecision.Approved;
+        NotifyChanged();
+    }
+
+    /// <summary>Discards the extracted characteristics; nothing is written.</summary>
+    public void DiscardCharacteristics(IngestionJob job)
+    {
+        if (job.CharacteristicDecision != ReviewDecision.Pending) return;
+        job.CharacteristicDecision = ReviewDecision.Rejected;
+        NotifyChanged();
+    }
+
+    // ---------- Plain-words edits before submitting ----------
+
+    /// <summary>
+    /// Applies a plain-words change to a draft still waiting for review (the asset proposal, the extracted
+    /// characteristics, or one PM draft) and keeps the result as the job's working copy. Nothing is saved.
+    /// </summary>
+    public async Task<ReviewEditResult> ApplyEditAsync(
+        IngestionJob job,
+        ReviewEditTarget target,
+        string instruction,
+        JobPlan? draft = null,
+        CancellationToken cancellationToken = default)
+    {
+        await using var scope = services.CreateAsyncScope();
+        var skill = scope.ServiceProvider.GetRequiredService<ReviewEditSkill>();
+        ReviewEditResult result;
+
+        switch (target)
+        {
+            case ReviewEditTarget.Proposal when job.CurrentProposal is { } proposal && job.AssetProposalDecision == ReviewDecision.Pending:
+            {
+                var edit = await skill.EditProposalAsync(ReviewEditMerger.ToEdit(proposal), instruction, cancellationToken);
+                var outcome = ReviewEditMerger.Apply(proposal, edit);
+                job.ProposalUndo.Push(job.EditedProposal);
+                job.EditedProposal = outcome.Result;
+                result = new ReviewEditResult(outcome.Summary, outcome.Refused);
+                break;
+            }
+
+            case ReviewEditTarget.Characteristics when job.CharacteristicDraft is { } current && job.CharacteristicDecision == ReviewDecision.Pending:
+            {
+                var edit = await skill.EditCharacteristicsAsync(ReviewEditMerger.ToEdit(current.Extracted), instruction, cancellationToken);
+                var outcome = ReviewEditMerger.Apply(current.Extracted, edit);
+                var characteristics = scope.ServiceProvider.GetRequiredService<CharacteristicService>();
+                var revised = await characteristics.ReviseDraftAsync(current, outcome.Result, cancellationToken);
+                job.CharacteristicUndo.Push(current);
+                job.CharacteristicDraft = revised;
+                result = new ReviewEditResult(outcome.Summary, outcome.Refused);
+                break;
+            }
+
+            case ReviewEditTarget.Plan when draft is not null && job.PlanDecision(draft) == ReviewDecision.Pending:
+            {
+                var current = job.CurrentPlan(draft);
+                var edit = await skill.EditPlanAsync(ReviewEditMerger.ToEdit(current), instruction, cancellationToken);
+                var outcome = ReviewEditMerger.Apply(current, edit);
+                job.PlanUndo.GetOrAdd(draft.Id, _ => new Stack<JobPlan?>())
+                    .Push(job.EditedPlans.TryGetValue(draft.Id, out var previous) ? previous : null);
+                job.EditedPlans[draft.Id] = outcome.Result;
+                result = new ReviewEditResult(outcome.Summary, outcome.Refused);
+                break;
+            }
+
+            default:
+                return new ReviewEditResult(null, ["That draft was already decided on, so it can't be changed any more."]);
+        }
+
+        NotifyChanged();
+        return result;
+    }
+
+    /// <summary>Reverts the last plain-words edit of a draft. Returns false when there is nothing to undo.</summary>
+    public bool UndoEdit(IngestionJob job, ReviewEditTarget target, JobPlan? draft = null)
+    {
+        switch (target)
+        {
+            case ReviewEditTarget.Proposal when job.ProposalUndo.TryPop(out var proposal):
+                job.EditedProposal = proposal;
+                break;
+            case ReviewEditTarget.Characteristics when job.CharacteristicUndo.TryPop(out var characteristics):
+                job.CharacteristicDraft = characteristics;
+                break;
+            case ReviewEditTarget.Plan when draft is not null
+                                            && job.PlanUndo.TryGetValue(draft.Id, out var stack)
+                                            && stack.TryPop(out var plan):
+                if (plan is null) job.EditedPlans.TryRemove(draft.Id, out _);
+                else job.EditedPlans[draft.Id] = plan;
+                break;
+            default:
+                return false;
+        }
+
+        NotifyChanged();
+        return true;
     }
 
     /// <summary>Discards a drafted PM model; drafts are never stored, so nothing is written.</summary>
@@ -351,7 +563,8 @@ public sealed class IngestionJobService(
                 cfg.AutoLinkConfidenceThreshold,
                 cfg.AutoCreateAssets,
                 cfg.GenerateJobPlans,
-                cfg.ExtractCharacteristics,
+                // With AskBeforeCharacteristics they are extracted later, only when the person asks for them.
+                cfg.ExtractCharacteristics && !cfg.AskBeforeCharacteristics,
                 cfg.ReviewNewAssets,
                 cfg.CreateInspectionJobs,
                 progress,

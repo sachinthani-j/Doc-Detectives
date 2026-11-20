@@ -329,6 +329,18 @@ h1:focus { outline: none; }
 .answer th { background: var(--surface-2); }
 .answer code { background: var(--surface-2); padding: .1rem .3rem; border-radius: 4px; }
 .answer h1, .answer h2, .answer h3 { font-size: 1rem; margin: .8rem 0 .4rem; }
+.answer.working { display: flex; gap: .55rem; align-items: center; }
+
+/* Chat uploads: reply chips, attach button, file bubble, drop overlay */
+.chat-card { position: relative; }
+.chips { display: flex; flex-wrap: wrap; gap: .45rem; margin-top: .7rem; }
+.msg.user .bubble.file-bubble { display: inline-flex; align-items: center; gap: .45rem; }
+.chat-attach { position: relative; overflow: hidden; cursor: pointer; flex-shrink: 0; }
+.chat-attach input[type=file] { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
+.chat-attach.disabled { opacity: .5; pointer-events: none; }
+.chat-drop { position: absolute; inset: 0; z-index: 5; border: 2px dashed var(--accent); border-radius: inherit; background: color-mix(in srgb, var(--accent-soft) 85%, transparent); display: grid; place-items: center; }
+.chat-drop input[type=file] { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: copy; }
+.chat-drop-label { display: flex; align-items: center; gap: .5rem; font-weight: 600; color: var(--accent-text); pointer-events: none; }
 .cite {
     display: inline-grid; place-items: center; min-width: 1.15rem; height: 1.15rem; padding: 0 .25rem;
     margin: 0 1px; border-radius: 4px; background: var(--accent-soft); color: var(--accent-text);

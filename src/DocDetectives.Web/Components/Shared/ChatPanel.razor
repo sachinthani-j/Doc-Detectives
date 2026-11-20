@@ -1,87 +1,142 @@
 @* Streaming Q&A chat with cited sources. The host page decides what is searched through Prepare
-   (all manuals, one asset's manuals, or one document). *@
+   (all manuals, one asset's manuals, or one document). With AllowUploads, documents can be attached and their
+   review (asset links, new asset, characteristics, job plans) is done as a conversation (see UploadConversation). *@
 @implements IDisposable
 @inject TechnicalManualQaSkill Qa
+@inject IngestionJobService Jobs
+@inject IAssetCatalogGateway Catalog
 @inject IJSRuntime JS
 
-<section class="card chat-card @Class">
+<section class="card chat-card @Class" @ondragenter="OnDragEnter">
     <div class="chat-head">
         <div class="grow truncate"><strong>@Title</strong></div>
-        @if (_turns.Count > 0)
+        @if (_messages.Count > 0)
         {
             <button class="btn btn-ghost btn-sm" @onclick="Clear" disabled="@_busy"><Icon Name="plus" Size="14" /> New chat</button>
         }
     </div>
 
     <div class="chat-scroll" @ref="_scroll">
-        @if (_turns.Count == 0)
+        @if (_messages.Count == 0)
         {
             <div class="empty" style="margin:auto">
                 <div class="icon-wrap"><Icon Name="chat" /></div>
                 <h3>@EmptyTitle</h3>
-                <p>Answers only use manual content and cite the sections they came from.</p>
+                <p>
+                    Answers only use manual content and cite the sections they came from.
+                    @if (AllowUploads) { <span>Attach a manual to add it; I'll walk you through linking and reviewing it.</span> }
+                </p>
                 <div class="suggestions">
                     @foreach (var s in Suggestions)
                     {
-                        <button class="suggestion" @onclick="@(() => AskAsync(s))">@s</button>
+                        <button class="suggestion" @onclick="@(() => SendAsync(s))">@s</button>
                     }
                 </div>
             </div>
         }
 
-        @foreach (var turn in _turns)
+        @foreach (var msg in _messages)
         {
-            <div class="msg user"><div class="bubble">@turn.Question</div></div>
+            switch (msg.Kind)
+            {
+                case MessageKind.User:
+                    <div class="msg user"><div class="bubble">@msg.Text</div></div>
+                    break;
 
-            <div class="msg bot">
-                <div class="avatar"><Icon Name="magnifier-doc" Size="16" /></div>
-                <div class="content">
-                    @if (turn.Error is not null)
-                    {
-                        <div class="alert alert-danger"><Icon Name="alert" /> <div>@turn.Error</div></div>
-                    }
-                    else if (turn.Answer.Length == 0 && turn.Streaming)
-                    {
-                        <div class="row subtle"><span class="spinner"></span> @(turn.Sources.Count == 0 ? "Searching…" : "Writing answer…")</div>
-                    }
-                    else
-                    {
-                        <div class="answer @(turn.Streaming ? "typing" : null)">@MarkdownRenderer.ToHtml(turn.Answer.ToString())</div>
-                    }
+                case MessageKind.File:
+                    <div class="msg user"><div class="bubble file-bubble"><Icon Name="file" Size="15" /> @msg.Text</div></div>
+                    break;
 
-                    @if (turn.Sources.Count > 0)
-                    {
-                        <div class="sources">
-                            <div class="subtle">Sources</div>
-                            @foreach (var src in turn.Sources)
+                case MessageKind.Assistant:
+                    <div class="msg bot">
+                        <div class="avatar"><Icon Name="magnifier-doc" Size="16" /></div>
+                        <div class="content">
+                            <div class="answer @(msg.Working ? "working" : null)">
+                                @if (msg.Working) { <span class="spinner"></span> }
+                                <div class="grow">@MarkdownRenderer.ToHtml(msg.Text)</div>
+                            </div>
+                            @if (msg == _messages[^1] && msg.Chips.Count > 0 && !_busy)
                             {
-                                <details class="source">
-                                    <summary>
-                                        <span class="num">@src.Number</span>
-                                        <span class="grow truncate">
-                                            <strong>@src.SectionTitle</strong>
-                                            @if (ShowSourceFile) { <span class="subtle">· @src.FileName</span> }
-                                        </span>
-                                        @if (ShowSourceFile)
-                                        {
-                                            <a class="source-link" href="@UiText.DocumentUrl(src.ManualId)" title="Open document" @onclick:stopPropagation="true">
-                                                <Icon Name="file" Size="14" />
-                                            </a>
-                                        }
-                                    </summary>
-                                    <div class="excerpt">@src.Content</div>
-                                </details>
+                                <div class="chips">
+                                    @foreach (var chip in msg.Chips)
+                                    {
+                                        <button class="suggestion" @onclick="@(() => SendAsync(chip))">@chip</button>
+                                    }
+                                </div>
                             }
                         </div>
-                    }
-                </div>
-            </div>
+                    </div>
+                    break;
+
+                case MessageKind.Answer:
+                    <div class="msg bot">
+                        <div class="avatar"><Icon Name="magnifier-doc" Size="16" /></div>
+                        <div class="content">
+                            @if (msg.Error is not null)
+                            {
+                                <div class="alert alert-danger"><Icon Name="alert" /> <div>@msg.Error</div></div>
+                            }
+                            else if (msg.Answer.Length == 0 && msg.Working)
+                            {
+                                <div class="row subtle"><span class="spinner"></span> @(msg.Sources.Count == 0 ? "Searching…" : "Writing answer…")</div>
+                            }
+                            else
+                            {
+                                <div class="answer @(msg.Working ? "typing" : null)">@MarkdownRenderer.ToHtml(msg.Answer.ToString())</div>
+                            }
+
+                            @if (msg.Sources.Count > 0)
+                            {
+                                <div class="sources">
+                                    <div class="subtle">Sources</div>
+                                    @foreach (var src in msg.Sources)
+                                    {
+                                        <details class="source">
+                                            <summary>
+                                                <span class="num">@src.Number</span>
+                                                <span class="grow truncate">
+                                                    <strong>@src.SectionTitle</strong>
+                                                    @if (ShowSourceFile) { <span class="subtle">· @src.FileName</span> }
+                                                </span>
+                                                @if (ShowSourceFile)
+                                                {
+                                                    <a class="source-link" href="@UiText.DocumentUrl(src.ManualId)" title="Open document" @onclick:stopPropagation="true">
+                                                        <Icon Name="file" Size="14" />
+                                                    </a>
+                                                }
+                                            </summary>
+                                            <div class="excerpt">@src.Content</div>
+                                        </details>
+                                    }
+                                </div>
+                            }
+                        </div>
+                    </div>
+                    break;
+            }
         }
     </div>
 
+    @if (AllowUploads && _dragging)
+    {
+        <div class="chat-drop">
+            <InputFile OnChange="OnFilesSelectedAsync" multiple accept="@Accept"
+                       @ondragleave="@(() => _dragging = false)" @ondrop="@(() => _dragging = false)" />
+            <div class="chat-drop-label"><Icon Name="upload" Size="22" /> Drop manuals to upload</div>
+        </div>
+    }
+
     <form class="chat-input" @onsubmit="SubmitAsync">
+        @if (AllowUploads)
+        {
+            <label class="btn btn-icon chat-attach @(_busy ? "disabled" : null)" style="height:44px;width:44px" title="Attach a manual">
+                <InputFile OnChange="OnFilesSelectedAsync" multiple accept="@Accept" disabled="@_busy" />
+                <Icon Name="upload" />
+            </label>
+        }
         <input class="input" style="height:44px" @bind="_question" @bind:event="oninput"
-               placeholder="@Placeholder" aria-label="Question" disabled="@_busy" autocomplete="off" />
+               placeholder="@(AwaitingConversation() is { } waiting ? $"Reply about {waiting.FileName}…" : Placeholder)"
+               aria-label="Message" disabled="@_busy" autocomplete="off" />
         @if (_busy)
         {
             <button type="button" class="btn btn-icon" style="height:44px;width:44px" @onclick="Stop" title="Stop"><Icon Name="stop" /></button>
@@ -94,6 +149,9 @@
 </section>
 
 @code {
+    private const int MaxFileMb = 100;
+    private const string Accept = ".pdf,.docx,.doc,.png,.jpg,.jpeg,.tiff";
+
     /// <summary>Finds the sources for a question and builds the prompt (decides the chat's scope).</summary>
     [Parameter, EditorRequired] public Func<string, CancellationToken, Task<QaContext>> Prepare { get; set; } = default!;
 
@@ -105,6 +163,15 @@
     /// <summary>Show which document each source came from (off when the chat is about one document).</summary>
     [Parameter] public bool ShowSourceFile { get; set; } = true;
 
+    /// <summary>Allow attaching documents and reviewing them in the conversation.</summary>
+    [Parameter] public bool AllowUploads { get; set; }
+
+    /// <summary>An uploaded manual was fully reviewed: the host can scope questions to it.</summary>
+    [Parameter] public EventCallback<(string ManualId, string FileName)> OnManualReady { get; set; }
+
+    /// <summary>The user asked to search all manuals again ("all manuals").</summary>
+    [Parameter] public EventCallback OnScopeReset { get; set; }
+
     [Parameter] public IReadOnlyList<string> Suggestions { get; set; } =
     [
         "How do I calibrate it?",
@@ -113,52 +180,137 @@
         "What does an error code mean?"
     ];
 
-    private sealed class Turn
+    private enum MessageKind { User, File, Answer, Assistant }
+
+    private sealed class Message
     {
-        public required string Question { get; init; }
+        public required MessageKind Kind { get; init; }
+        public string Text { get; set; } = "";
+        public IReadOnlyList<string> Chips { get; set; } = [];
+        public bool Working { get; set; }
         public System.Text.StringBuilder Answer { get; } = new();
         public IReadOnlyList<AnswerSource> Sources { get; set; } = [];
-        public bool Streaming { get; set; } = true;
         public string? Error { get; set; }
     }
 
-    private readonly List<Turn> _turns = [];
+    private readonly List<Message> _messages = [];
+    private readonly List<UploadConversation> _uploads = [];
+    private readonly Dictionary<UploadConversation, Message> _progress = [];
     private ElementReference _scroll;
     private string _question = "";
     private bool _busy;
+    private bool _dragging;
     private CancellationTokenSource? _cts;
 
     public void Clear()
     {
         if (_busy) return;
-        _turns.Clear();
+        _messages.Clear();
+        DisposeUploads();
         StateHasChanged();
     }
 
-    private Task SubmitAsync() => AskAsync(_question);
+    private Task SubmitAsync() => SendAsync(_question);
 
-    private async Task AskAsync(string question)
+    private async Task SendAsync(string text)
     {
-        question = question.Trim();
-        if (question.Length == 0 || _busy) return;
+        text = text.Trim();
+        if (text.Length == 0 || _busy) return;
 
-        var turn = new Turn { Question = question };
-        _turns.Add(turn);
+        _messages.Add(new Message { Kind = MessageKind.User, Text = text });
         _question = "";
         _busy = true;
         _cts = new CancellationTokenSource();
+        var token = _cts.Token;
         await ScrollAsync();
 
         try
         {
-            var context = await Prepare(question, _cts.Token);
-            turn.Sources = context.Sources;
+            if (AwaitingConversation() is { } conversation)
+            {
+                await ReplyToConversationAsync(conversation, text, token);
+            }
+            else if (OnScopeReset.HasDelegate && IsScopeReset(text))
+            {
+                await OnScopeReset.InvokeAsync();
+                await PostAsync(AssistantMessage.Text("OK, I search all manuals again."));
+            }
+            else
+            {
+                await AnswerAsync(text, Prepare, token);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            await PostAsync(AssistantMessage.Text("Stopped."));
+        }
+        catch (Exception ex)
+        {
+            await PostAsync(AssistantMessage.Text($"⚠ Something went wrong: {ex.Message}"));
+        }
+        finally
+        {
+            _busy = false;
+            _cts?.Dispose();
+            _cts = null;
+        }
+
+        // A queued document may have finished while this was running.
+        await PumpAsync();
+        StateHasChanged();
+        await ScrollAsync();
+    }
+
+    private async Task ReplyToConversationAsync(UploadConversation conversation, string text, CancellationToken token)
+    {
+        // An answer, an undo or a change in plain words is handled by the conversation itself.
+        switch (await conversation.ReplyAsync(text, PostAsync, token))
+        {
+            case ReplyOutcome.Question when conversation.Manual is { } manual:
+                // A question about the manual in between: answer it from that manual, then ask again.
+                await AnswerAsync(text, (q, ct) => Qa.PrepareForManualAsync(manual.ManualId, manual.FileName, q, cancellationToken: ct), token);
+                await PostAsync(await conversation.RepeatQuestionAsync(token));
+                break;
+
+            case ReplyOutcome.Question:
+                await AnswerAsync(text, Prepare, token);
+                await PostAsync(await conversation.RepeatQuestionAsync(token));
+                break;
+
+            case ReplyOutcome.NotUnderstood:
+                await PostAsync(await conversation.HintAsync(token));
+                break;
+        }
+
+        await NotifyIfFinishedAsync(conversation);
+    }
+
+    private async Task NotifyIfFinishedAsync(UploadConversation conversation)
+    {
+        if (conversation.IsFinished && conversation.Manual is { } manual && OnManualReady.HasDelegate)
+        {
+            await OnManualReady.InvokeAsync(manual);
+        }
+    }
+
+    // Streams a grounded answer into a new message (the existing Q&A behaviour).
+    private async Task AnswerAsync(string question, Func<string, CancellationToken, Task<QaContext>> prepare, CancellationToken token)
+    {
+        var msg = new Message { Kind = MessageKind.Answer, Working = true };
+        _messages.Add(msg);
+        StateHasChanged();
+        await ScrollAsync();
+
+        try
+        {
+            var context = await prepare(question, token);
+            msg.Sources = context.Sources;
             StateHasChanged();
 
             var lastRender = DateTime.UtcNow;
-            await foreach (var token in Qa.StreamAnswerAsync(context, _cts.Token))
+            await foreach (var piece in Qa.StreamAnswerAsync(context, token))
             {
-                turn.Answer.Append(token);
+                msg.Answer.Append(piece);
                 if ((DateTime.UtcNow - lastRender).TotalMilliseconds > 60)
                 {
                     lastRender = DateTime.UtcNow;
@@ -169,22 +321,141 @@
         }
         catch (OperationCanceledException)
         {
-            if (turn.Answer.Length == 0) turn.Error = "Stopped.";
+            if (msg.Answer.Length == 0) msg.Error = "Stopped.";
         }
         catch (Exception ex)
         {
-            turn.Error = $"Something went wrong: {ex.Message}";
+            msg.Error = $"Something went wrong: {ex.Message}";
         }
         finally
         {
-            turn.Streaming = false;
-            _busy = false;
-            _cts?.Dispose();
-            _cts = null;
-            StateHasChanged();
-            await ScrollAsync();
+            msg.Working = false;
         }
     }
+
+    // Adds an assistant message; earlier "working" messages stop spinning.
+    private async Task PostAsync(AssistantMessage message)
+    {
+        if (string.IsNullOrWhiteSpace(message.Markdown)) return;
+
+        foreach (var m in _messages.Where(m => m.Kind == MessageKind.Assistant && m.Working && !_progress.ContainsValue(m)))
+        {
+            m.Working = false;
+        }
+
+        _messages.Add(new Message
+        {
+            Kind = MessageKind.Assistant,
+            Text = message.Markdown,
+            Chips = message.Chips,
+            Working = message.Working
+        });
+
+        StateHasChanged();
+        await ScrollAsync();
+    }
+
+    private void OnDragEnter() => _dragging = AllowUploads && !_busy;
+
+    private async Task OnFilesSelectedAsync(InputFileChangeEventArgs e)
+    {
+        _dragging = false;
+        if (_busy) return;
+        _busy = true;
+
+        try
+        {
+            foreach (var file in e.GetMultipleFiles(20))
+            {
+                _messages.Add(new Message { Kind = MessageKind.File, Text = file.Name });
+
+                if (!IngestionJobService.IsSupported(file.Name))
+                {
+                    await PostAsync(AssistantMessage.Text($"I can't read **{file.Name}**: supported types are PDF, Word and images."));
+                    continue;
+                }
+
+                try
+                {
+                    await using var stream = file.OpenReadStream(MaxFileMb * 1024L * 1024L);
+                    var path = await Jobs.SaveUploadAsync(stream, file.Name, CancellationToken.None);
+                    var conversation = new UploadConversation(Jobs, Catalog, Jobs.Enqueue(path));
+                    conversation.Changed += () => _ = InvokeAsync(() => OnConversationChangedAsync(conversation));
+                    _uploads.Add(conversation);
+
+                    var progress = new Message { Kind = MessageKind.Assistant, Text = conversation.Progress, Working = true };
+                    _progress[conversation] = progress;
+                    _messages.Add(progress);
+                }
+                catch (IOException ex) when (ex.Message.Contains("exceeds", StringComparison.OrdinalIgnoreCase))
+                {
+                    await PostAsync(AssistantMessage.Text($"**{file.Name}** is larger than {MaxFileMb} MB."));
+                }
+                catch (Exception ex)
+                {
+                    await PostAsync(AssistantMessage.Text($"⚠ Could not upload **{file.Name}**: {ex.Message}"));
+                }
+            }
+
+            if (_uploads.Any(u => !u.IsFinished))
+            {
+                await PostAsync(AssistantMessage.Text(
+                    "Processing takes a minute or two. You can keep asking questions meanwhile; I'll come back with review questions when it's done."));
+            }
+        }
+        finally
+        {
+            _busy = false;
+        }
+
+        await PumpAsync();
+        StateHasChanged();
+        await ScrollAsync();
+    }
+
+    private async Task OnConversationChangedAsync(UploadConversation conversation)
+    {
+        if (_progress.TryGetValue(conversation, out var progress))
+        {
+            progress.Text = conversation.Progress;
+            progress.Working = conversation.IsProcessing;
+        }
+
+        await PumpAsync();
+        StateHasChanged();
+        await ScrollAsync();
+    }
+
+    // Starts the review of the first unfinished document once it is processed; one document is reviewed at a time.
+    private async Task PumpAsync()
+    {
+        while (!_busy && _uploads.FirstOrDefault(u => !u.IsFinished) is { ReadyToReview: true } next)
+        {
+            _busy = true;
+            try
+            {
+                await next.StartReviewAsync(PostAsync, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                await PostAsync(AssistantMessage.Text($"⚠ Could not continue with **{next.FileName}**: {ex.Message}"));
+            }
+            finally
+            {
+                _busy = false;
+            }
+
+            await NotifyIfFinishedAsync(next);
+            if (!next.IsFinished) break; // waiting for the user's reply
+        }
+    }
+
+    // The document whose review question is open (the first unfinished one, in upload order).
+    private UploadConversation? AwaitingConversation() =>
+        _uploads.FirstOrDefault(u => !u.IsFinished) is { AwaitingReply: true } open ? open : null;
+
+    private static bool IsScopeReset(string text) =>
+        text.Trim().TrimEnd('.', '!').ToLowerInvariant() is "all manuals" or "search all manuals" or "all documents";
 
     private void Stop() => _cts?.Cancel();
 
@@ -194,5 +465,16 @@
         catch { /* prerendering or disconnected */ }
     }
 
-    public void Dispose() => _cts?.Cancel();
+    private void DisposeUploads()
+    {
+        foreach (var upload in _uploads) upload.Dispose();
+        _uploads.Clear();
+        _progress.Clear();
+    }
+
+    public void Dispose()
+    {
+        _cts?.Cancel();
+        DisposeUploads();
+    }
 }

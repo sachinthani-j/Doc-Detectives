@@ -17,7 +17,8 @@ public sealed record ManualProcessingReport(
     string AssetCreationNote,
     IReadOnlyList<Asset> CreatedAssets,
     IReadOnlyList<Asset> ProposedAssets,
-    IReadOnlySet<string>? ExistingAssetIds = null);
+    IReadOnlySet<string>? ExistingAssetIds = null,
+    bool AlreadyIndexed = false);
 
 /// <summary>
 /// An asset tree waiting for review: nothing is created until a person approves it.
@@ -202,8 +203,8 @@ public sealed class ManualIngestionOrchestrator(
         await Task.WhenAll(embedTask, plansTask, assetDetailsTask);
 
         var manual = new ManualProcessingReport(
-            enrichedManual, match.Mappings, embedTask.Result, match.AssetCreationNote, match.CreatedAssets,
-            match.ProposedAssets, match.ExistingAssetIds);
+            enrichedManual, match.Mappings, embedTask.Result.Count, match.AssetCreationNote, match.CreatedAssets,
+            match.ProposedAssets, match.ExistingAssetIds, embedTask.Result.AlreadyIndexed);
         var details = assetDetailsTask.Result;
 
         progress?.Report(IngestionStage.Completed);
@@ -504,14 +505,27 @@ public sealed class ManualIngestionOrchestrator(
             enrichedManual, mappings, assetCreationNote, createdAssets, proposedAssets, linkedAssetIds, existingAssetIds);
     }
 
-    /// <summary>Embeds the manual's sections (plus a structured summary) and stores them for chat. Returns the chunk count.</summary>
-    private async Task<int> EmbedAndStoreAsync(
+    /// <summary>
+    /// Embeds the manual's sections (plus a structured summary) and stores them for chat. Returns the chunk count,
+    /// and whether the manual was already indexed (then nothing is embedded or written).
+    /// </summary>
+    private async Task<(int Count, bool AlreadyIndexed)> EmbedAndStoreAsync(
         ExtractedManual enrichedManual,
         EquipmentAssetStructure structure,
         IReadOnlyList<string> linkedAssetIds,
         IProgress<IngestionStage>? progress,
         CancellationToken cancellationToken)
     {
+        // The manual ID is cut from the file's content hash: the same file uploaded again has the same ID.
+        // Its sections are then already in the index, so embedding them again would only cost time.
+        if (await FindIndexedManualAsync(enrichedManual.ManualId, cancellationToken) is { SectionCount: > 0 } indexed)
+        {
+            logger.LogInformation(
+                "Ingest {File}: already indexed with {Count} section(s); skipping embedding and indexing",
+                enrichedManual.FileName, indexed.SectionCount);
+            return (indexed.SectionCount, true);
+        }
+
         // 5. Build chunks: prepend the extracted structured asset summary + section Markdown chunks
         var allChunks = new List<ManualChunk>
         {
@@ -539,7 +553,21 @@ public sealed class ManualIngestionOrchestrator(
         progress?.Report(IngestionStage.StoringInIndex);
         await knowledgeIndex.UpsertChunksAsync(vectorizedChunks, cancellationToken);
 
-        return vectorizedChunks.Count;
+        return (vectorizedChunks.Count, false);
+    }
+
+    private async Task<ManualReference?> FindIndexedManualAsync(string manualId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await knowledgeIndex.GetManualAsync(manualId, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // E.g. the index does not exist yet on a first run: treat as not indexed.
+            logger.LogDebug(ex, "Could not check whether manual {ManualId} is indexed", manualId);
+            return null;
+        }
     }
 
     // The embedding model accepts at most 8192 tokens per input. Technical text (part numbers, tables)

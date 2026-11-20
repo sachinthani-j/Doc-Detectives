@@ -16,20 +16,34 @@
 
     <div class="chat-layout">
         @* @key gives a fresh conversation whenever the scope changes. *@
+        @* Switching to an uploaded manual keeps the conversation (no @key change); picking an asset starts a new one. *@
         <ChatPanel @key="@(_asset?.Id ?? "*")"
                    Prepare="PrepareAsync"
-                   Title="@(_asset is null ? "All manuals" : _asset.Name)"
+                   AllowUploads="true"
+                   OnManualReady="SetManual"
+                   OnScopeReset="ClearManual"
+                   Title="@(_manual is { } m ? m.FileName : _asset is null ? "All manuals" : _asset.Name)"
                    EmptyTitle="@(_asset is null ? "Ask anything from the uploaded manuals" : $"Ask about {_asset.Name}")"
-                   Placeholder="@(_asset is null ? "Ask a question about any manual…" : $"Ask about {_asset.Id}…")" />
+                   Placeholder="@(_manual is { } p ? $"Ask about {p.FileName}…" : _asset is null ? "Ask a question about any manual…" : $"Ask about {_asset.Id}…")" />
 
         <aside class="card card-pad scope-card stack">
             <div>
                 <h3>Scope</h3>
-                <p class="subtle" style="margin-top:.2rem">Limit answers to manuals linked to one asset, or search everything.</p>
+                <p class="subtle" style="margin-top:.2rem">Limit answers to manuals linked to one asset, or search everything. A manual you upload in the chat becomes the scope once it is reviewed.</p>
             </div>
 
             <div class="scope-current">
-                @if (_asset is null)
+                @if (_manual is { } manual)
+                {
+                    <span style="color:var(--accent-text)"><Icon Name="file" /></span>
+                    <div class="grow" style="min-width:0">
+                        <div style="font-weight:600" class="truncate" title="@manual.FileName">@manual.FileName</div>
+                        <div class="subtle">Only this uploaded manual is searched.</div>
+                        <a class="subtle" href="@UiText.DocumentUrl(manual.ManualId)">Open document</a>
+                    </div>
+                    <button class="btn btn-ghost btn-sm btn-icon" style="width:30px" title="Search all manuals instead" @onclick="ClearManual"><Icon Name="x" Size="15" /></button>
+                }
+                else if (_asset is null)
                 {
                     <span class="icon-tile" style="color:var(--accent-text)"><Icon Name="globe" /></span>
                     <div class="grow">
@@ -115,8 +129,17 @@
         }
     }
 
+    // Set when a manual uploaded in the chat has been reviewed: questions are then answered from it only.
+    private (string ManualId, string FileName)? _manual;
+
     private Task<QaContext> PrepareAsync(string question, CancellationToken cancellationToken) =>
-        Qa.PrepareAsync(_asset?.Id, question, cancellationToken: cancellationToken);
+        _manual is { } manual
+            ? Qa.PrepareForManualAsync(manual.ManualId, manual.FileName, question, cancellationToken: cancellationToken)
+            : Qa.PrepareAsync(_asset?.Id, question, cancellationToken: cancellationToken);
+
+    private void SetManual((string ManualId, string FileName) manual) => _manual = manual;
+
+    private void ClearManual() => _manual = null;
 
     private async Task OnPickerInput(ChangeEventArgs e)
     {
@@ -143,6 +166,7 @@
 
     private void SelectAsset(Asset asset)
     {
+        _manual = null;
         _pickerText = "";
         _pickerResults = [];
         Nav.NavigateTo(UiText.AskUrl(asset.Id));

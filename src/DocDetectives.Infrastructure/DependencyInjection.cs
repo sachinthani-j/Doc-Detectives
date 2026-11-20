@@ -98,6 +98,7 @@ public static class DependencyInjection
         services.AddSingleton<CharacteristicService>();
         services.AddSingleton<AssetProposalService>();
         services.AddSingleton<AssetMatchingSkill>();
+        services.AddSingleton<ReviewEditSkill>();
         services.AddSingleton<TechnicalManualQaSkill>();
         services.AddSingleton<ManualIngestionOrchestrator>();
 

@@ -154,6 +154,9 @@ public static class AssetTreeBuilder
     public static int? ValidYear(int? year) =>
         year is >= 1900 && year <= DateTime.UtcNow.Year + 1 ? year : null;
 
+    /// <summary>The ID a sub-asset with this name gets under the root (same scheme as <see cref="Build"/>).</summary>
+    public static string SubAssetId(string rootId, string name) => $"{rootId}-{SubKey(name)}";
+
     // Azure Search key-safe and deterministic, so re-ingestion updates the same assets.
     private static string Clean(string value) =>
         Regex.Replace(value.ToUpperInvariant(), "[^A-Z0-9]+", "-").Trim('-');
